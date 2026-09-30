@@ -36,6 +36,12 @@ pub enum ImageFormat {
   ICO
   /// Tagged Image File Format, baseline uncompressed only in this build.
   TIFF
+  /// CETC BVE-series X-ray security-scanner raw detector stream
+  /// (`.fim`); 16-bit little-endian column-major payload after a
+  /// 230-byte little-endian header. `decode` returns the two
+  /// dual-energy halves laid out side by side; `decode_fim_raw`
+  /// returns the raw 16-bit GrayA8 detector image.
+  FIM
 }
 
 ///|
@@ -49,7 +55,8 @@ pub fn ImageFormat::is_decodable(self : ImageFormat) -> Bool {
     | ImageFormat::GIF
     | ImageFormat::JPEG
     | ImageFormat::ICO
-    | ImageFormat::TIFF => true
+    | ImageFormat::TIFF
+    | ImageFormat::FIM => true
   }
 }
 

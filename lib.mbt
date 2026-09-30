@@ -51,6 +51,12 @@ pub fn detect_format(data : Bytes) -> ImageFormat? {
     return Some(ImageFormat::BMP)
   }
 
+  // FIM: J A (2-byte magic) - CETC BVE-series X-ray security-scanner
+  // raw detector stream. Distinct from BMP's 'B' 'M' so order-independent.
+  if data.length() >= 2 && data[0] == b'J' && data[1] == b'A' {
+    return Some(ImageFormat::FIM)
+  }
+
   // TGA detection: check for type 2 footer first (most reliable),
   // then fall back to header heuristic (requires >= 18 bytes).
   if detect_tga(data) {
@@ -213,6 +219,7 @@ fn decode_by_format_raw(
     ImageFormat::JPEG => decode_jpeg(data)
     ImageFormat::ICO => decode_ico(data)
     ImageFormat::TIFF => decode_tiff(data)
+    ImageFormat::FIM => decode_fim(data)
   }
 }
 
@@ -257,6 +264,14 @@ fn image_dimensions_raw(
     ImageFormat::ICO | ImageFormat::TIFF => {
       let img = decode_by_format_raw(data, format)
       (img.width, img.height, format)
+    }
+    // FIM: raw detector (width, height), header-only read; decode_fim
+    // returns the side-by-side 2*width x height/2 display image, so
+    // we report the detector grid here to match decode_fim_raw and
+    // the public `fim_dimensions` helper.
+    ImageFormat::FIM => {
+      let (w, h) = fim_dimensions(data)
+      (w, h, ImageFormat::FIM)
     }
   }
 }
@@ -354,6 +369,7 @@ pub fn image_format_name(format : ImageFormat) -> String {
     ImageFormat::JPEG => "JPEG"
     ImageFormat::ICO => "ICO"
     ImageFormat::TIFF => "TIFF"
+    ImageFormat::FIM => "FIM"
   }
 }
 

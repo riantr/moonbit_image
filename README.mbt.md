@@ -1,8 +1,29 @@
 # riantr/moonbit_image
 
-Pure-MoonBit image decoder / encoder covering **BMP / QOI / TGA / PNG / GIF / JPEG / ICO / TIFF**. Zero external runtime dependencies — every codec is hand-written in MoonBit and lives inside this single package.
+Pure-MoonBit image decoder / encoder covering **BMP / QOI / TGA / PNG / GIF / JPEG / ICO / TIFF / FIM**. Zero external runtime dependencies — every codec is hand-written in MoonBit and lives inside this single package.
 
 This package is forked from [`lws/moonbit_image`](https://github.com/Milky2018/moonbit-image) (MIT, 2025). The original sources were vendored inside `moonbit-labeler/extensions/image/`; this package repackages them as a standalone `mooncakes.io` library so the labeler and any other MoonBit project can depend on a single shared implementation.
+
+## What's new in 0.3.6
+
+Adds the **FIM** codec — CETC BVE-series X-ray security-scanner raw detector streams (`.fim`). The `.fim` format is a 230-byte little-endian header followed by a column-major 16-bit little-endian payload; the scanner interleaves the two dual-energy exposures on the time axis, so the even and odd ROWS of the decoded image are the low- and high-energy halves. Zero new dependencies — the decoder uses the package's `Image` / `PixelFormat` / `read_u32_le` primitives and a hand-rolled natural log.
+
+* **`decode_fim(data)`** — display-ready `Image`: the two dual-energy halves laid out side by side (`low | high`, `2*width x height/2`), rendered to 8-bit `Gray8` with the viewer defaults (sRGB degamma, [1, 99] percentile stretch, inverted). One image, no second lookup — a plain image viewer shows both halves at once.
+* **`decode_fim_raw(data)`** — the raw detector image as `GrayA8` of size `(width, height)`, two bytes per pixel carrying the 16-bit sample big-endian. No flip, no split, no degamma; downstream code can re-derive whatever it needs.
+* **`fim_dimensions(data)`** — header-only `(width, height)` of the detector grid (no pixel decode). Wired into `image_dimensions()` for the unified path.
+* **Geometry helpers** (all operate on `GrayA8`):
+  * `fim_side_by_side(left, right)` — horizontal join for any matching pixel format.
+  * `fim_split_rows(img)` — even rows / odd rows, returning two `(width, height/2)` images.
+  * `fim_split_cols(img)` — even columns / odd columns, returning two `(width/2, height)` images (legacy detector-channel split).
+  * `fim_apply_y_roll(img, shift_px)` — cyclic vertical roll, matching numpy `roll(shift, axis=0)`.
+  * `fim_find_bright_strip(img, air_threshold?)` — bottom-most all-air band, `(top_row, row_count)`.
+  * `fim_find_auto_y_roll(img)` — half the bright-strip height, shifted up.
+* **Grayscale / dual-energy renderers**:
+  * `fim_to_grayscale8(img, invert?, degamma?, percentile_low?, percentile_high?)` — value = sample/65535, optional sRGB degamma (`γ = 2.2`), optional [low, high] percentile stretch, optional invert, byte = `floor(value * 255 + 0.5)`.
+  * `fim_ratio_grayscale / fim_ratio_pseudo_color / fim_ratio_pseudo_color_hsb` — dual-energy `R = ln(I0 / I_low) / ln(I0 / I_high)`, gray / palette / HSB pseudo-color respectively. Black where invalid.
+* **`detect_format`** recognises the 2-byte `J A` (0x4A 0x41) magic; `image_dimensions` returns the raw detector grid.
+* **`ImageFormat::FIM`** added; `is_decodable()` reports `true`. No encoder — `encode(_, FIM)` raises `EncodeNotImplemented`.
+* **No `ImageFormat::FIM` requires any of the other codecs to compile** — the new module is self-contained.
 
 ## What's new in 0.3.4
 
@@ -116,9 +137,28 @@ pub fn decode_tga(data : Bytes) -> Image raise Failure
 pub fn decode_png(data : Bytes) -> Image raise Failure
 pub fn decode_gif(data : Bytes) -> Image raise Failure
 pub fn decode_jpeg(data : Bytes) -> Image raise Failure
+pub fn decode_fim(data : Bytes) -> Image raise Failure            // dual-energy side-by-side, Gray8
+pub fn decode_fim_raw(data : Bytes) -> Image raise Failure         // raw 16-bit detector, GrayA8
+pub fn fim_dimensions(data : Bytes) -> (Int, Int) raise Failure    // raw detector (width, height)
+
+// FIM geometry helpers (GrayA8 in, GrayA8 out)
+pub fn fim_side_by_side(left : Image, right : Image) -> Image raise Failure
+pub fn fim_split_rows(img : Image) -> (Image, Image) raise Failure
+pub fn fim_split_cols(img : Image) -> (Image, Image) raise Failure
+pub fn fim_apply_y_roll(img : Image, shift_px : Int) -> Image raise Failure
+pub fn fim_find_bright_strip(img : Image, air_threshold? : Double = 50000.0) -> (Int, Int) raise Failure
+pub fn fim_find_auto_y_roll(img : Image) -> Int raise Failure
+
+// FIM renderers
+pub fn fim_to_grayscale8(img : Image, invert? : Bool = true, degamma? : Bool = false,
+                         percentile_low? : Double? = Some(1.0),
+                         percentile_high? : Double? = Some(99.0)) -> Image raise Failure
+pub fn fim_ratio_grayscale(low : Image, high : Image) -> Image raise Failure
+pub fn fim_ratio_pseudo_color(low : Image, high : Image) -> Image raise Failure
+pub fn fim_ratio_pseudo_color_hsb(low : Image, high : Image) -> Image raise Failure
 
 // writers (QOI + BMP only); encode() raises DecodeError::EncodeNotImplemented
-// for everything else
+// for everything else (including FIM)
 pub fn encode(image : Image, format : ImageFormat) -> Bytes raise DecodeError
 pub fn encode_qoi(image : Image) -> Bytes raise Failure
 pub fn encode_bmp(image : Image) -> Bytes raise Failure
