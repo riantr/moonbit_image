@@ -186,11 +186,20 @@ let qoi  = @moonbit_image.encode(half, ImageFormat::QOI)
 
 ## License
 
-Dual-licensed under **MIT or Apache-2.0**, at your option.
+Licensed under the **MIT License**. See `LICENSE-MIT` for the full
+text. (Prior to 0.3.7 this package was dual-licensed `MIT OR
+Apache-2.0`; the Apache-2.0 grant was dropped in 0.3.7 because
+none of the source files had any upstream Apache-2.0 or GPL/BSD
+ancestry — all code is either original (© 2025 lws, MIT) or new
+revisions (© 2026 RiantR, MIT), so a single MIT grant covers the
+whole work.)
 
-The image codec sources in this package were originally published by lws as [`moonbit_image`](https://github.com/Milky2018/moonbit-image) under the MIT license. To stay compatible with that upstream, this package keeps the MIT grant; we additionally offer Apache-2.0 so downstream consumers can pick whichever license fits their project. See `LICENSE-MIT` and `LICENSE-APACHE` for the full texts.
+The image codec sources in this package were originally published by
+lws as [`moonbit_image`](https://github.com/Milky2018/moonbit-image)
+under the MIT license.
 
 ## Attribution
 
 - Original sources © 2025 lws, MIT — see upstream history at https://github.com/Milky2018/moonbit-image.
-- 0.2.0 revisions (DecodeError, JPEG chroma fix, API cleanup) © 2026 RiantR, MIT or Apache-2.0.
+- 0.2.0 revisions (DecodeError, JPEG chroma fix, API cleanup) © 2026 RiantR, MIT.
+- 0.3.7 license consolidation (drop Apache-2.0 dual grant) © 2026 RiantR, MIT.
