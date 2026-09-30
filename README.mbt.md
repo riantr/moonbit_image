@@ -1,6 +1,6 @@
 # riantr/moonbit_image
 
-Pure-MoonBit image decoder / encoder covering **BMP / QOI / TGA / PNG / GIF / JPEG / ICO / TIFF / FIM**. Zero external runtime dependencies — every codec is hand-written in MoonBit and lives inside this single package.
+Pure-MoonBit image decoder / encoder covering **BMP / QOI / TGA / PNG / GIF / JPEG / ICO / TIFF / FIM**. Zero external runtime dependencies — every codec is implemented in MoonBit and lives inside this single package.
 
 This package is forked from [`lws/moonbit_image`](https://github.com/Milky2018/moonbit-image) (MIT, 2025). The original sources were vendored inside `moonbit-labeler/extensions/image/`; this package repackages them as a standalone `mooncakes.io` library so the labeler and any other MoonBit project can depend on a single shared implementation.
 
@@ -182,7 +182,7 @@ let qoi  = @moonbit_image.encode(half, ImageFormat::QOI)
 
 ## Tests
 
-`moon test --target native` runs the white-box tests in `lib_test.mbt` (29 tests across format detection, header reading, decode round-trips for QOI + BMP, colour math, geometric transforms, and a fuzz sweep over random pixels / random crops). Black-box tests live in `qa/`.
+`moon test --target native` runs the white-box tests in `lib_test.mbt` (43 tests across format detection for all 9 codecs, header reading, decode round-trips for QOI + BMP, FIM detect/dimensions/decode on a synthesized 1×2 detector, colour math, geometric transforms, and a fuzz sweep over random pixels / random crops). Black-box tests live in `qa/`.
 
 ## License
 
