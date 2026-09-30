@@ -1,0 +1,56 @@
+{
+  "img_name": "png_gradient_32x32_rgba.png",
+  "infos": [
+    {
+      "id": "obj-fbcczk8o",
+      "type": "object",
+      "shape": "rect",
+      "points": [
+        [
+          10.0,
+          10.0
+        ],
+        [
+          110.0,
+          60.0
+        ]
+      ]
+    },
+    {
+      "id": "obj-7s71cmvq",
+      "type": "object",
+      "shape": "polygon",
+      "points": [
+        [
+          2.0,
+          2.0
+        ],
+        [
+          30.0,
+          2.0
+        ],
+        [
+          30.0,
+          30.0
+        ],
+        [
+          2.0,
+          30.0
+        ]
+      ]
+    },
+    {
+      "id": "obj-wmbwk0vb",
+      "type": "keypoint",
+      "shape": "keypoint",
+      "points": [
+        [
+          16.0,
+          16.0
+        ]
+      ]
+    }
+  ],
+  "bindings": [],
+  "frames": []
+}

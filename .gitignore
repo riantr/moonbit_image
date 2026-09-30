@@ -1,0 +1,14 @@
+# MoonBit build artifacts
+target/
+.moonbit/
+.moonagent/
+
+# Mooncakes cache
+.mooncakes/
+
+# Editor / OS noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

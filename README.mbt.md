@@ -1,0 +1,156 @@
+# riantr/moonbit_image
+
+Pure-MoonBit image decoder / encoder covering **BMP / QOI / TGA / PNG / GIF / JPEG / ICO / TIFF**. Zero external runtime dependencies — every codec is hand-written in MoonBit and lives inside this single package.
+
+This package is forked from [`lws/moonbit_image`](https://github.com/Milky2018/moonbit-image) (MIT, 2025). The original sources were vendored inside `moonbit-labeler/extensions/image/`; this package repackages them as a standalone `mooncakes.io` library so the labeler and any other MoonBit project can depend on a single shared implementation.
+
+## What's new in 0.3.4
+
+Bug-fix release for the JPEG IDCT. The 1-D `idct_1d` routine was
+unconditionally adding the +128 level shift and clamping to [0, 255] on
+every call, but `idct_2d` runs it twice (row pass + column pass). The
+cumulative effect was a +256 shift (clamping almost every pixel to
+white) plus a clipped intermediate row pass that the column pass
+couldn't recover from — the classic "花屏" 8×8 block pattern visible on
+every real-world JPEG in mizchi / backend-decode mode.
+
+The fix splits the row and column passes with explicit flags:
+`idct_1d(v, out, os, apply_level_shift, is_final)`. The row pass gets
+`false, false`; the column pass gets `true, true`. Level shift and
+clamp are now applied exactly once, on the final (column) pass.
+
+Reported by `riantr/moonbit_labeler` mizchi smoke test on the BIOMEDICA
+X-ray JPEG set. Same patch applied locally in the consuming project
+verified end-to-end before the upstream release.
+
+## What's new in 0.3.3
+
+Patch release — no functional changes from 0.3.2 / 0.3.1. Locking in the
+current state after a full benchmark pass on the consuming project
+(`riantr/moonbit_labeler`); 49/49 tests pass against this version, and the
+`docs/benchmark.md` baseline in moonbit-labeler measures each decoder /
+encoder at known reference sizes. The metrics are stable across
+re-runs, so 0.3.3 is safe to depend on for downstream production work.
+
+## What's new in 0.3.0
+
+0.3.0 adds two new formats — ICO (Windows icon / cursor container) and TIFF (Tagged Image File Format) — and ships 11 new tests covering them. Every existing 0.2.x test still passes.
+
+* **`decode_ico`** routes ICO entries through the existing BMP / PNG decoders:
+
+  * Full BMP file (with the 14-byte `BM` header) — pass-through.
+  * Full PNG file (the Vista+ form) — pass-through.
+  * DIB-only BMP (older icons) — a synthetic 14-byte file header is prepended so the existing BMP decoder can take it.
+
+  The largest entry by area (with the first entry as the tie-breaker) is returned.
+
+* **`decode_tiff`** handles baseline uncompressed TIFF only. The supported subset is documented explicitly so callers know what to expect:
+
+  | Field | Supported |
+  |---|---|
+  | Byte order | `II` (little-endian); `MM` raises `InvalidHeader` |
+  | Compression | `1` (none); LZW / Deflate / JPEG-in-TIFF rejected |
+  | Photometric | `0` (WhiteIsZero), `1` (BlackIsZero), `2` (RGB), `3` (Palette) |
+  | BitsPerSample | 1 / 2 / 4 / 8 / 16 (uniform across samples) |
+  | SamplesPerPixel | 1 (greyscale / palette) or 3 (RGB) |
+  | PlanarConfiguration | `1` (chunky); planar rejected |
+  | Layout | single strip only |
+  | Sample format | UINT |
+
+  16-bit samples are right-shifted to 8 bits for output — display-friendly but lossy for photographic TIFFs. The ColorMap tag is read and palette indices are expanded to RGBA8.
+
+* **`detect_format`** recognises both the new magic byte sequences (`II*\0`, `MM\0*` for TIFF; `00 00 01 00 NN …` for ICO).
+
+* **`ImageFormat::is_decodable()`** now reports `true` for both new variants.
+
+## What's new in 0.2.0
+
+0.2.0 is a breaking-API revision that cleans up the public error story and fixes a real chroma-shearing bug in the JPEG decoder.
+
+* **Structured `DecodeError`** replaces the previous stringly-typed `Failure::Failure("...")` errors. Every public decoder / encoder entry point now raises one of:
+
+  | Variant | When it fires |
+  |---|---|
+  | `DecodeError::UnsupportedFormat(String)` | magic bytes do not match any known format signature |
+  | `DecodeError::TruncatedData(String)` | a frame / chunk / scanline ended in the middle of a read |
+  | `DecodeError::InvalidHeader(String)` | a header field is out of range or has an unsupported value |
+  | `DecodeError::InvalidValue(String)` | a header / pixel-data value was readable but rejected downstream |
+  | `DecodeError::EncodeNotImplemented(String)` | `encode()` was called with a decode-only format |
+
+  Callers can `match err { ... }` on the variant, or call `.to_string()` for a one-line diagnostic. The per-codec helpers (`decode_bmp`, `decode_qoi`, …) and low-level byte readers (`read_u32_le`, …) keep raising the built-in `Failure` suberror; the public wrappers translate it.
+
+* **Removed legacy convenience APIs**: `is_supported_format` and `is_encode_supported`. Use the new `ImageFormat::is_decodable() / is_encodable()` instance methods instead — they take an `ImageFormat` and read better in `match` arms:
+
+  ```mbt
+  match fmt {
+    ImageFormat::BMP => ...
+    f if f.is_decodable() => ...
+  }
+  ```
+
+* **Fixed JPEG chroma positioning bug** (the "花屏" issue): for chroma components in 4:2:0 / 4:2:2 subsampled JPEGs the decoder placed each chroma block at `mx * sf_h * 8` instead of `mx * max_h * 8`, which mis-aligned Cb / Cr against the luma plane and produced visible colour fringing / colour banding on most real-world photos. The chroma sampler now uses the correct macro-grid stride.
+
+* **`Image::to_rgba8` simplified**: removed a redundant early-return-then-match-again structure; the function now uses one `guard` over the source format and a single bulk conversion loop per source layout.
+
+## Why a separate package
+
+`moonbit-labeler` used to vendor the image codec under `extensions/image/`. That works, but every labeler checkout ships its own copy and any other MoonBit project that wants the same decoder has to vendor the sources again. Moving the codec to a dedicated `mooncakes.io` module:
+
+- lets `moonbit-labeler` depend on it via `import "riantr/moonbit_image"`
+- lets any other MoonBit project reuse the same decoder / encoder
+- isolates the codec under a clean test surface (BMP / QOI round-trip, pixel math, geometric transforms) that isn't tied to the labeler UI
+
+## API surface
+
+```mbt
+// one-shot auto-detect decoder; raises DecodeError
+pub fn decode(data : Bytes) -> Image raise DecodeError
+
+// header-only dimension read (no pixel decode)
+pub fn image_dimensions(data : Bytes) -> (Int, Int, ImageFormat) raise DecodeError
+
+// per-format decoders (still raise the lower-level Failure)
+pub fn decode_bmp(data : Bytes) -> Image raise Failure
+pub fn decode_qoi(data : Bytes) -> Image raise Failure
+pub fn decode_tga(data : Bytes) -> Image raise Failure
+pub fn decode_png(data : Bytes) -> Image raise Failure
+pub fn decode_gif(data : Bytes) -> Image raise Failure
+pub fn decode_jpeg(data : Bytes) -> Image raise Failure
+
+// writers (QOI + BMP only); encode() raises DecodeError::EncodeNotImplemented
+// for everything else
+pub fn encode(image : Image, format : ImageFormat) -> Bytes raise DecodeError
+pub fn encode_qoi(image : Image) -> Bytes raise Failure
+pub fn encode_bmp(image : Image) -> Bytes raise Failure
+```
+
+`Image` is `{ width, height, format, data }` where `format` is one of `Gray8 / GrayA8 / RGB8 / RGBA8`. The `Color` struct, `Image::to_rgba8 / to_grayscale / flip_horizontal / rotate_* / resize_* / brighten / histogram / average_color`, and the color-space conversion methods on `Color` (`to_hsl / from_hsl / to_hsv / from_hsv / blend / lerp / distance / to_gray`) are all available.
+
+## Quick start
+
+```mbt
+// decode a JPEG -> Image, resize, re-encode as QOI
+let img  = @moonbit_image.decode(jpeg_bytes) catch {
+  err => {
+    @log.warn("decode failed: \{err}")
+    abort("give up")
+  }
+}
+let half = img.resize_nearest(img.width / 2, img.height / 2)
+let qoi  = @moonbit_image.encode(half, ImageFormat::QOI)
+```
+
+## Tests
+
+`moon test --target native` runs the white-box tests in `lib_test.mbt` (29 tests across format detection, header reading, decode round-trips for QOI + BMP, colour math, geometric transforms, and a fuzz sweep over random pixels / random crops). Black-box tests live in `qa/`.
+
+## License
+
+Dual-licensed under **MIT or Apache-2.0**, at your option.
+
+The image codec sources in this package were originally published by lws as [`moonbit_image`](https://github.com/Milky2018/moonbit-image) under the MIT license. To stay compatible with that upstream, this package keeps the MIT grant; we additionally offer Apache-2.0 so downstream consumers can pick whichever license fits their project. See `LICENSE-MIT` and `LICENSE-APACHE` for the full texts.
+
+## Attribution
+
+- Original sources © 2025 lws, MIT — see upstream history at https://github.com/Milky2018/moonbit-image.
+- 0.2.0 revisions (DecodeError, JPEG chroma fix, API cleanup) © 2026 RiantR, MIT or Apache-2.0.
