@@ -25,8 +25,8 @@
 /// For a 256x256 image, this avoids ~65,000 struct allocations.
 fn lzw_decompress(
   data : Bytes,
-  min_code_size : Int,
-  pixel_count : Int,
+  min_code_size : Int32,
+  pixel_count : Int32,
 ) -> Array[Byte] raise Failure {
   // LZW constants
   let max_table = 4096
@@ -41,11 +41,11 @@ fn lzw_decompress(
   let stack = Array::make(max_table, b'\x00')
 
   // Mutable LZW state (was LzwDecoder struct)
-  let mut pos : Int = 0
-  let mut bit_pos : Int = 0
-  let mut code_size : Int = min_code_size + 1
-  let mut next_code : Int = eoi_code + 1
-  let mut max_code : Int = (1 << code_size) - 1
+  let mut pos : Int32 = 0
+  let mut bit_pos : Int32 = 0
+  let mut code_size : Int32 = min_code_size + 1
+  let mut next_code : Int32 = eoi_code + 1
+  let mut max_code : Int32 = (1 << code_size) - 1
 
   let pixels = Array::make(pixel_count, b'\x00')
   let mut pi = 0
@@ -74,7 +74,7 @@ fn lzw_decompress(
       pixels[pi] = code2.to_byte()
       pi = pi + 1
     }
-    let mut prev : Int = code2
+    let mut prev : Int32 = code2
 
     while pi < pixel_count {
       let (p3, bp3, code3) = lzw_read_code(data, pos, bit_pos, code_size)
@@ -129,7 +129,7 @@ fn lzw_decompress(
     pixels[pi] = code1.to_byte()
     pi = pi + 1
   }
-  let mut prev : Int = code1
+  let mut prev : Int32 = code1
 
   // --- main decode loop ---
   while pi < pixel_count {
@@ -187,10 +187,10 @@ fn lzw_decompress(
 /// Uses bulk byte reading when byte-aligned for codes >= 8 bits.
 fn lzw_read_code(
   data : Bytes,
-  pos : Int,
-  bit_pos : Int,
-  code_size : Int,
-) -> (Int, Int, Int) raise Failure {
+  pos : Int32,
+  bit_pos : Int32,
+  code_size : Int32,
+) -> (Int32, Int32, Int32) raise Failure {
   let mut byte_pos = pos
   let mut bp = bit_pos
   let mut result = 0
@@ -238,16 +238,16 @@ fn lzw_read_code(
 /// This function handles both the normal case and the KwKwK edge case correctly:
 /// when `code == next_code`, output = string(prev_code) + first_char(string(prev_code)).
 fn lzw_decode_string(
-  table_prefix : Array[Int],
-  table_suffix : Array[Int],
+  table_prefix : Array[Int32],
+  table_suffix : Array[Int32],
   stack : Array[Byte],
-  code : Int,
-  prev_code : Int,
-  eoi_code : Int,
-  code_size : Int,
-  next_code : Int,
-  max_code : Int,
-) -> (Int, Int, Int, Int) raise Failure {
+  code : Int32,
+  prev_code : Int32,
+  eoi_code : Int32,
+  code_size : Int32,
+  next_code : Int32,
+  max_code : Int32,
+) -> (Int32, Int32, Int32, Int32) raise Failure {
   let max_table = table_prefix.length()
   let mut c = code
   let mut sp = 0
@@ -319,11 +319,11 @@ pub fn decode_gif(data : Bytes) -> Image raise Failure {
 /// GIF decoder state
 priv struct GifDecoder {
   data : Bytes
-  pos : Int
-  width : Int
-  height : Int
-  global_ct : Array[(Int, Int, Int)] // (R, G, B) tuples
-  bg_color : Int
+  pos : Int32
+  width : Int32
+  height : Int32
+  global_ct : Array[(Int32, Int32, Int32)] // (R, G, B) tuples
+  bg_color : Int32
 }
 
 ///|
@@ -371,14 +371,17 @@ fn GifDecoder::new(data : Bytes) -> GifDecoder raise Failure {
     }
   }
 
-  { data, pos, width: w, height: h, global_ct: gct, bg_color: bg }
+  { data, pos, width: w, height: h, global_ct: gct, bg_color: bg, }
 }
 
 ///|
 /// Read a sub-block chain (GIF data sub-blocks)
 /// Each sub-block: 1-byte count (0-255) followed by count bytes of data
 /// Terminated by a 0-byte count
-fn read_sub_blocks(data : Bytes, start_pos : Int) -> (Bytes, Int) raise Failure {
+fn read_sub_blocks(
+  data : Bytes,
+  start_pos : Int32,
+) -> (Bytes, Int32) raise Failure {
   let buf = Buffer()
   let mut pos = start_pos
   while pos < data.length() {
@@ -399,7 +402,7 @@ fn read_sub_blocks(data : Bytes, start_pos : Int) -> (Bytes, Int) raise Failure 
 ///|
 /// Build interlace row mapping for 4-pass interlacing
 /// Returns an array mapping source row index to destination row
-fn build_interlace_map(img_h : Int) -> Array[Int] {
+fn build_interlace_map(img_h : Int32) -> Array[Int32] {
   let row_map = Array::make(img_h, 0)
   let mut ri = 0
   // Pass 1: every 8th row starting at 0
@@ -437,7 +440,7 @@ fn build_interlace_map(img_h : Int) -> Array[Int] {
 /// Pre-compute color table as RGBA byte quads for fast pixel writes.
 /// Converts (Int,Int,Int) tuples to [r_byte, g_byte, b_byte, a_byte] arrays,
 /// eliminating per-pixel .to_byte() calls and tuple destructuring.
-fn ct_to_rgba(ct : Array[(Int, Int, Int)]) -> Array[Array[Byte]] {
+fn ct_to_rgba(ct : Array[(Int32, Int32, Int32)]) -> Array[Array[Byte]] {
   let n = ct.length()
   let result = Array::make(n, [b'\x00', b'\x00', b'\x00', b'\xFF'])
   for i = 0; i < n; i = i + 1 {

@@ -124,7 +124,7 @@ pub fn decode_ico(data : Bytes) -> Image raise Failure {
 ///   uint32   data_offset  (where pixel data starts in the file)
 ///
 /// All values written little-endian.
-fn build_bmp_file_header(file_size : Int, data_offset : Int) -> Bytes {
+fn build_bmp_file_header(file_size : Int32, data_offset : Int32) -> Bytes {
   let b0 = file_size & 0xFF
   let b1 = (file_size >> 8) & 0xFF
   let b2 = (file_size >> 16) & 0xFF

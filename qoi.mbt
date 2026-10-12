@@ -7,19 +7,19 @@
 // QOI chunk types (identified by high bits of first byte)
 
 ///|
-const QOI_OP_RGB : Int = 0xFE // 11111110
+const QOI_OP_RGB : Int32 = 0xFE // 11111110
 
 ///|
-const QOI_OP_RGBA : Int = 0xFF // 11111111
+const QOI_OP_RGBA : Int32 = 0xFF // 11111111
 
 ///|
-const QOI_OP_INDEX : Int = 0x00 // 00xxxxxx
+const QOI_OP_INDEX : Int32 = 0x00 // 00xxxxxx
 
 ///|
-const QOI_OP_DIFF : Int = 0x40 // 01xxxxxx
+const QOI_OP_DIFF : Int32 = 0x40 // 01xxxxxx
 
 ///|
-const QOI_OP_LUMA : Int = 0x80 // 10xxxxxx
+const QOI_OP_LUMA : Int32 = 0x80 // 10xxxxxx
 
 ///|
 /// Decode a QOI image from raw bytes
@@ -32,9 +32,9 @@ pub fn decode_qoi(data : Bytes) -> Image raise Failure {
 /// QOI decoder state
 priv struct QoiDecoder {
   data : Bytes
-  pos : Int
-  width : Int
-  height : Int
+  pos : Int32
+  width : Int32
+  height : Int32
 }
 
 ///|
@@ -62,7 +62,7 @@ fn QoiDecoder::new(data : Bytes) -> QoiDecoder raise Failure {
     raise Failure::Failure("QOI: invalid colorspace value")
   }
 
-  { data, pos: 14, width, height }
+  { data, pos: 14, width, height, }
 }
 
 ///|
@@ -196,6 +196,6 @@ fn QoiDecoder::decode(self : QoiDecoder) -> Image raise Failure {
 
 ///|
 /// QOI color hash function: (r*3 + g*5 + b*7 + a*11) % 64
-fn qoi_hash(r : Int, g : Int, b : Int, a : Int) -> Int {
+fn qoi_hash(r : Int32, g : Int32, b : Int32, a : Int32) -> Int32 {
   (r * 3 + g * 5 + b * 7 + a * 11) % 64
 }

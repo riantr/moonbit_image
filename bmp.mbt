@@ -12,10 +12,10 @@
 // Compression types
 
 ///|
-const BI_RLE8 : Int = 1
+const BI_RLE8 : Int32 = 1
 
 ///|
-const BI_RLE4 : Int = 2
+const BI_RLE4 : Int32 = 2
 
 //-----------------------------------------------------------------------------
 // BMP Decoder
@@ -32,13 +32,13 @@ pub fn decode_bmp(data : Bytes) -> Image raise Failure {
 /// BMP decoder state machine
 priv struct BmpDecoder {
   data : Bytes
-  width : Int
-  height : Int
+  width : Int32
+  height : Int32
   top_down : Bool
-  bpp : Int
-  compression : Int
-  data_offset : Int
-  dib_size : Int
+  bpp : Int32
+  compression : Int32
+  data_offset : Int32
+  dib_size : Int32
 }
 
 ///|
@@ -81,7 +81,7 @@ fn BmpDecoder::new(data : Bytes) -> BmpDecoder raise Failure {
   // about; if a strictly-correct read becomes necessary we can lift it
   // onto the struct and feed it to `read_palette`.)
   let _bi_clr_used = if dib_size >= 36 { read_u32_le(data, 14 + 32) } else { 0 }
-  { data, width, height, top_down, bpp, compression, data_offset, dib_size }
+  { data, width, height, top_down, bpp, compression, data_offset, dib_size, }
 }
 
 ///|
@@ -110,7 +110,7 @@ fn BmpDecoder::decode(self : BmpDecoder) -> Image raise Failure {
 /// Read palette from BMP data (after DIB header)
 fn BmpDecoder::read_palette(
   self : BmpDecoder,
-  num_colors : Int,
+  num_colors : Int32,
 ) -> Array[Color] {
   let palette_offset = 14 + self.dib_size // file header + DIB header
   let palette = Array::make(num_colors, Color::default())
@@ -141,7 +141,7 @@ fn palette_to_rgba_bytes(palette : Array[Color]) -> Array[Array[Byte]] {
 
 ///|
 /// Row stride in bytes (padded to 4-byte boundary)
-fn bmp_row_stride(width : Int, bpp : Int) -> Int {
+fn bmp_row_stride(width : Int32, bpp : Int32) -> Int32 {
   let row_bits = width * bpp
   let row_bytes = (row_bits + 7) / 8
   (row_bytes + 3) / 4 * 4
@@ -151,9 +151,9 @@ fn bmp_row_stride(width : Int, bpp : Int) -> Int {
 /// Write a palette color to the output buffer at a pixel position
 fn write_palette_pixel(
   _buf : Array[Byte],
-  dst : Int,
-  idx : Int,
-  num_colors : Int,
+  dst : Int32,
+  idx : Int32,
+  num_colors : Int32,
   palette_rgba : Array[Array[Byte]],
 ) -> Unit {
   if idx < num_colors {

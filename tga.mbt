@@ -21,11 +21,11 @@ pub fn decode_tga(data : Bytes) -> Image raise Failure {
 /// TGA decoder state
 priv struct TgaDecoder {
   data : Bytes
-  width : Int
-  height : Int
-  pixel_depth : Int
-  image_descriptor : Int
-  data_offset : Int
+  width : Int32
+  height : Int32
+  pixel_depth : Int32
+  image_descriptor : Int32
+  data_offset : Int32
   rle : Bool
 }
 
@@ -76,7 +76,7 @@ fn TgaDecoder::new(data : Bytes) -> TgaDecoder raise Failure {
   }
   let data_offset = id_offset + _color_map_size
 
-  { data, width, height, pixel_depth, image_descriptor, data_offset, rle }
+  { data, width, height, pixel_depth, image_descriptor, data_offset, rle, }
 }
 
 ///|
@@ -90,7 +90,7 @@ fn TgaDecoder::decode(self : TgaDecoder) -> Image raise Failure {
 
 ///|
 /// Bytes per pixel for the source TGA data
-fn TgaDecoder::src_bpp(self : TgaDecoder) -> Int {
+fn TgaDecoder::src_bpp(self : TgaDecoder) -> Int32 {
   self.pixel_depth / 8
 }
 
@@ -106,7 +106,7 @@ fn TgaDecoder::top_origin(self : TgaDecoder) -> Bool {
 /// Output is always top-to-bottom. TGA can store top-to-bottom or bottom-to-top.
 /// - If file is top-to-bottom (top_origin): src_row = dst_row (no flip needed)
 /// - If file is bottom-to-top: src_row = height - 1 - dst_row (flip)
-fn TgaDecoder::src_row(self : TgaDecoder, dst_row : Int) -> Int {
+fn TgaDecoder::src_row(self : TgaDecoder, dst_row : Int32) -> Int32 {
   if self.top_origin() {
     dst_row // File is already top-to-bottom, matches output order
   } else {
@@ -268,10 +268,10 @@ fn TgaDecoder::decode_rle(self : TgaDecoder) -> Image raise Failure {
 /// so per-pixel bounds check is redundant and omitted here
 fn write_tga_pixel(
   _buf : Array[Byte],
-  dst_offset : Int,
+  dst_offset : Int32,
   src : Bytes,
-  src_offset : Int,
-  pixel_depth : Int,
+  src_offset : Int32,
+  pixel_depth : Int32,
 ) -> Unit {
   if pixel_depth == 8 {
     _buf[dst_offset] = src[src_offset]

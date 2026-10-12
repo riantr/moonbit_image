@@ -19,7 +19,7 @@
 
 ///|
 /// Zigzag scan order (JPEG spec Figure K.2)
-let zigzag : Array[Int] = [
+let zigzag : Array[Int32] = [
   0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5, 12, 19, 26, 33, 40, 48,
   41, 34, 27, 20, 13, 6, 7, 14, 21, 28, 35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15,
   23, 30, 37, 44, 51, 58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62,
@@ -29,7 +29,7 @@ let zigzag : Array[Int] = [
 ///|
 /// IDCT basis coefficients (scaled by 2^12 = 4096)
 /// cos((2x+1)*u*pi/16) * 4096 for each (u, x)
-let dct_t : Array[Array[Int]] = [
+let dct_t : Array[Array[Int32]] = [
   [1448, 1448, 1448, 1448, 1448, 1448, 1448, 1448],
   [2009, 1703, 1138, 400, -400, -1138, -1703, -2009],
   [1892, 784, -784, -1892, -1892, -784, 784, 1892],
@@ -50,19 +50,19 @@ let dct_t : Array[Array[Int]] = [
 /// Fields are named differently from BitReader to avoid type ambiguity.
 priv struct JBR {
   buf : Bytes // entropy-coded data (with 0xFF00 stuffing already stripped)
-  bp : Int // current byte position
-  bitp : Int // next bit to read within byte (0=MSB, 7=LSB)
+  bp : Int32 // current byte position
+  bitp : Int32 // next bit to read within byte (0=MSB, 7=LSB)
 }
 
 ///|
 fn JBR::new(data : Bytes) -> JBR {
-  { buf: data, bp: 0, bitp: 0 }
+  { buf: data, bp: 0, bitp: 0, }
 }
 
 ///|
 /// Read n bits MSB-first. Returns (new_reader, value).
 /// Uses bulk byte reading when byte-aligned for efficiency.
-fn JBR::read_bits(self : JBR, n : Int) -> (JBR, Int) raise Failure {
+fn JBR::read_bits(self : JBR, n : Int32) -> (JBR, Int32) raise Failure {
   if n == 0 {
     return (self, 0)
   }
@@ -102,7 +102,7 @@ fn JBR::read_bits(self : JBR, n : Int) -> (JBR, Int) raise Failure {
     }
   }
 
-  ({ buf: self.buf, bp: bp_idx, bitp: bit_pos }, result)
+  ({ buf: self.buf, bp: bp_idx, bitp: bit_pos, }, result)
 }
 
 //-----------------------------------------------------------------------------
@@ -113,8 +113,8 @@ fn JBR::read_bits(self : JBR, n : Int) -> (JBR, Int) raise Failure {
 /// JPEG Huffman table entry.
 /// Fields are named sym/len to avoid conflict with PNG's HEntry (symbol/length).
 priv struct JHTEntry {
-  sym : Int
-  len : Int
+  sym : Int32
+  len : Int32
 }
 
 ///|
@@ -122,13 +122,13 @@ priv struct JHTEntry {
 /// Uses the same approach as PNG's huff_decode (png.mbt:65-69).
 priv struct JHT {
   table : Array[JHTEntry]
-  tbl_bits : Int
+  tbl_bits : Int32
 }
 
 ///|
 /// Build a fast prefix-lookup Huffman table from BITS and HUFFVAL arrays.
 /// This eliminates the O(n) bit-at-a-time scan with an O(1) table lookup.
-fn build_jht(bits : Array[Int], hv_in : Array[Int]) -> JHT {
+fn build_jht(bits : Array[Int32], hv_in : Array[Int32]) -> JHT {
   // Find the maximum code length
   let mut max_len = 0
   for l = 1; l <= 16; l = l + 1 {
@@ -138,8 +138,8 @@ fn build_jht(bits : Array[Int], hv_in : Array[Int]) -> JHT {
   }
   if max_len == 0 {
     // Return empty table with sentinel
-    let tbl = Array::make(1, { sym: -1, len: 0 })
-    return { table: tbl, tbl_bits: 0 }
+    let tbl = Array::make(1, { sym: -1, len: 0, })
+    return { table: tbl, tbl_bits: 0, }
   }
 
   // Compute canonical Huffman codes for each length (MSB-first like JPEG)
@@ -161,7 +161,7 @@ fn build_jht(bits : Array[Int], hv_in : Array[Int]) -> JHT {
   // Build prefix table of size 2^tbl_bits
   let tbl_bits = max_len
   let ts = 1 << tbl_bits
-  let sentinel = { sym: -1, len: 0 }
+  let sentinel = { sym: -1, len: 0, }
   let tbl = Array::make(ts, sentinel)
 
   let mut si = 0
@@ -174,7 +174,7 @@ fn build_jht(bits : Array[Int], hv_in : Array[Int]) -> JHT {
         let sym_val = hv_in[si]
         si = si + 1
         // Fill all table entries starting with this prefix
-        let entry = { sym: sym_val, len: l }
+        let entry = { sym: sym_val, len: l, }
         let base = c << (tbl_bits - l)
         let step = 1 << (tbl_bits - l)
         for j = 0; j < step && base + j < ts; j = j + 1 {
@@ -184,14 +184,14 @@ fn build_jht(bits : Array[Int], hv_in : Array[Int]) -> JHT {
     }
   }
 
-  { table: tbl, tbl_bits }
+  { table: tbl, tbl_bits, }
 }
 
 ///|
 /// Decode a symbol using the prefix lookup table.
 /// Reads one bit at a time (avoiding push-back complexity), but uses the
 /// prefix table for O(1) validation at each bit length.
-fn jht_decode(ht : JHT, r : JBR) -> (JBR, Int) raise Failure {
+fn jht_decode(ht : JHT, r : JBR) -> (JBR, Int32) raise Failure {
   let mut reader = r
   let mut code = 0
   for l = 1; l <= 16; l = l + 1 {
@@ -229,9 +229,9 @@ fn jht_decode(ht : JHT, r : JBR) -> (JBR, Int) raise Failure {
 ///     NOT be clamped, otherwise the next 1-D pass's cosine sums
 ///     saturate and we get the classic "花屏" 8×8 block pattern.
 fn idct_1d(
-  v : Array[Int],
-  out : Array[Int],
-  os : Int,
+  v : Array[Int32],
+  out : Array[Int32],
+  os : Int32,
   apply_level_shift : Bool,
   is_final : Bool,
 ) -> Unit {
@@ -265,7 +265,7 @@ fn idct_1d(
 /// 2-D IDCT on an 8x8 block, returns 64-element pixel array.
 /// Optimized: reuses 3 pre-allocated 8-element buffers instead of
 /// allocating 8 row + 8 tmp + 8 col = 24 temporary arrays per block.
-fn idct_2d(block : Array[Int]) -> Array[Int] {
+fn idct_2d(block : Array[Int32]) -> Array[Int32] {
   // First pass: IDCT on rows, store in transposed layout. No level
   // shift here — the row pass operates on the level-shifted DCT
   // coefficients and produces a row of (still level-shifted) IDCT
@@ -308,7 +308,7 @@ fn idct_2d(block : Array[Int]) -> Array[Int] {
 
 ///|
 /// Decode DC coefficient. Returns (reader, new_value, new_pred).
-fn jpg_dc(r : JBR, ht : JHT, pred : Int) -> (JBR, Int, Int) raise Failure {
+fn jpg_dc(r : JBR, ht : JHT, pred : Int32) -> (JBR, Int32, Int32) raise Failure {
   let (r2, cat) = jht_decode(ht, r)
   if cat == 0 {
     return (r2, pred, pred)
@@ -324,7 +324,7 @@ fn jpg_dc(r : JBR, ht : JHT, pred : Int) -> (JBR, Int, Int) raise Failure {
 /// Decode AC coefficients for one 8x8 block.
 /// Writes decoded values to block[] at zigzag positions.
 /// Returns the updated reader.
-fn jpg_ac(r : JBR, ht : JHT, block : Array[Int]) -> JBR raise Failure {
+fn jpg_ac(r : JBR, ht : JHT, block : Array[Int32]) -> JBR raise Failure {
   let mut reader = r
   let mut k = 1
   while k < 64 {
@@ -365,9 +365,9 @@ fn jpg_block(
   r : JBR,
   dc_ht : JHT,
   ac_ht : JHT,
-  qt : Array[Int],
-  dc_pred : Int,
-) -> (JBR, Int, Array[Int]) raise Failure {
+  qt : Array[Int32],
+  dc_pred : Int32,
+) -> (JBR, Int32, Array[Int32]) raise Failure {
   let block = Array::make(64, 0)
   let (r2, _dc_val, ndc) = jpg_dc(r, dc_ht, dc_pred)
   let r3 = jpg_ac(r2, ac_ht, block)
@@ -386,7 +386,7 @@ fn jpg_block(
 ///|
 /// Convert YCbCr to RGB using ITU-R BT.601 coefficients with 12 fractional bits.
 /// All values are clamped to [0, 255].
-fn ycbcr_to_rgb(y : Int, cb : Int, cr : Int) -> (Int, Int, Int) {
+fn ycbcr_to_rgb(y : Int32, cb : Int32, cr : Int32) -> (Int32, Int32, Int32) {
   let cb_off = cb - 128
   let cr_off = cr - 128
 
@@ -432,7 +432,7 @@ pub fn decode_jpeg(data : Bytes) -> Image raise Failure {
 
   // Huffman tables: [TC][TH] where TC=0:DC, TC=1:AC
   let ht_sentinel = JHT::{
-    table: Array::make(1, { sym: -1, len: 0 }),
+    table: Array::make(1, { sym: -1, len: 0, }),
     tbl_bits: 0,
   }
   let dc_ht = Array::make(4, ht_sentinel)
@@ -696,7 +696,7 @@ pub fn decode_jpeg(data : Bytes) -> Image raise Failure {
                   for i = 0; i < nc; i = i + 1 {
                     dc_pred[i] = 0
                   }
-                  reader = { buf: reader.buf, bp: reader.bp, bitp: 0 }
+                  reader = { buf: reader.buf, bp: reader.bp, bitp: 0, }
                 }
               }
             }
@@ -761,7 +761,7 @@ pub fn decode_jpeg(data : Bytes) -> Image raise Failure {
 ///|
 /// Read JPEG dimensions from header without decoding pixels.
 /// Fast path: scans for SOF0 marker and extracts width/height.
-pub fn jpeg_dimensions(data : Bytes) -> (Int, Int) raise Failure {
+pub fn jpeg_dimensions(data : Bytes) -> (Int32, Int32) raise Failure {
   if data.length() < 2 || data[0].to_int() != 0xFF || data[1].to_int() != 0xD8 {
     raise Failure::Failure("JPEG: missing SOI marker")
   }

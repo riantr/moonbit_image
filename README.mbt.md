@@ -102,7 +102,7 @@ re-runs, so 0.3.3 is safe to depend on for downstream production work.
 
 * **Removed legacy convenience APIs**: `is_supported_format` and `is_encode_supported`. Use the new `ImageFormat::is_decodable() / is_encodable()` instance methods instead — they take an `ImageFormat` and read better in `match` arms:
 
-  ```mbt
+  ```mbt nocheck
   match fmt {
     ImageFormat::BMP => ...
     f if f.is_decodable() => ...
@@ -123,7 +123,7 @@ re-runs, so 0.3.3 is safe to depend on for downstream production work.
 
 ## API surface
 
-```mbt
+```mbt nocheck
 // one-shot auto-detect decoder; raises DecodeError
 pub fn decode(data : Bytes) -> Image raise DecodeError
 
@@ -168,16 +168,21 @@ pub fn encode_bmp(image : Image) -> Bytes raise Failure
 
 ## Quick start
 
-```mbt
+```mbt nocheck
 // decode a JPEG -> Image, resize, re-encode as QOI
-let img  = @moonbit_image.decode(jpeg_bytes) catch {
+///|
+let img = @moonbit_image.decode(jpeg_bytes) catch {
   err => {
     @log.warn("decode failed: \{err}")
     abort("give up")
   }
 }
+
+///|
 let half = img.resize_nearest(img.width / 2, img.height / 2)
-let qoi  = @moonbit_image.encode(half, ImageFormat::QOI)
+
+///|
+let qoi = @moonbit_image.encode(half, ImageFormat::QOI)
 ```
 
 ## Tests

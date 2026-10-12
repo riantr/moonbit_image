@@ -28,7 +28,7 @@
 //-----------------------------------------------------------------------------
 
 ///|
-const FIM_HEADER_BYTES : Int = 0xE6
+const FIM_HEADER_BYTES : Int32 = 0xE6
 
 ///|
 const FIM_SRGB_GAMMA : Double = 2.2
@@ -81,9 +81,9 @@ pub fn decode_fim_raw(data : Bytes) -> Image raise Failure {
 /// FIM decoder state machine
 priv struct FimDecoder {
   data : Bytes
-  width : Int
-  height : Int
-  payload_start : Int
+  width : Int32
+  height : Int32
+  payload_start : Int32
 }
 
 ///|
@@ -136,7 +136,7 @@ fn FimDecoder::decode(self : FimDecoder) -> Image raise Failure {
 /// Read the detector dimensions (width, height) from the header, without
 /// decoding.  `decode_fim` returns an image of size
 /// (2 * width, height / 2).
-pub fn fim_dimensions(data : Bytes) -> (Int, Int) raise Failure {
+pub fn fim_dimensions(data : Bytes) -> (Int32, Int32) raise Failure {
   let decoder = FimDecoder::new(data)
   (decoder.width, decoder.height)
 }
@@ -146,7 +146,7 @@ pub fn fim_dimensions(data : Bytes) -> (Int, Int) raise Failure {
 //-----------------------------------------------------------------------------
 
 ///|
-fn fim_sample(img : Image, x : Int, y : Int) -> Int {
+fn fim_sample(img : Image, x : Int32, y : Int32) -> Int32 {
   let i = (y * img.width + x) * 2
   (img.data[i].to_int() << 8) | img.data[i + 1].to_int()
 }
@@ -154,10 +154,10 @@ fn fim_sample(img : Image, x : Int, y : Int) -> Int {
 ///|
 fn fim_store(
   pixels : FixedArray[Byte],
-  w : Int,
-  x : Int,
-  y : Int,
-  v : Int,
+  w : Int32,
+  x : Int32,
+  y : Int32,
+  v : Int32,
 ) -> Unit {
   let i = (y * w + x) * 2
   pixels[i] = ((v >> 8) & 0xFF).to_byte()
@@ -165,7 +165,7 @@ fn fim_store(
 }
 
 ///|
-fn fim_gray_a8(w : Int, h : Int, pixels : FixedArray[Byte]) -> Image {
+fn fim_gray_a8(w : Int32, h : Int32, pixels : FixedArray[Byte]) -> Image {
   Image::new(w, h, PixelFormat::GrayA8, Bytes::from_array(pixels))
 }
 
@@ -243,7 +243,7 @@ pub fn fim_split_cols(img : Image) -> (Image, Image) raise Failure {
 ///|
 /// Cyclic vertical roll: result row y = source row (y - shift) mod h.
 /// A positive shift moves content down, matching numpy `roll(shift, axis=0)`.
-pub fn fim_apply_y_roll(img : Image, shift_px : Int) -> Image raise Failure {
+pub fn fim_apply_y_roll(img : Image, shift_px : Int32) -> Image raise Failure {
   let w = img.width
   let h = img.height
   let pixels = FixedArray::make(w * h * 2, b'\x00')
@@ -267,8 +267,8 @@ pub fn fim_apply_y_roll(img : Image, shift_px : Int) -> Image raise Failure {
 /// the image is too small or has no such band.
 pub fn fim_find_bright_strip(
   img : Image,
-  air_threshold? : Double = 50000.0,
-) -> (Int, Int) raise Failure {
+  air_threshold~ : Double = 50000.0,
+) -> (Int32, Int32) raise Failure {
   let w = img.width
   let h = img.height
   if h < 50 || w < 50 {
@@ -317,7 +317,7 @@ pub fn fim_find_bright_strip(
 ///|
 /// Auto-detect the display Y roll from the bright bottom strip: shift the
 /// image up by half the strip height, leaving a small visible top strip.
-pub fn fim_find_auto_y_roll(img : Image) -> Int raise Failure {
+pub fn fim_find_auto_y_roll(img : Image) -> Int32 raise Failure {
   let strip = fim_find_bright_strip(img)
   if strip.1 == 0 {
     return 0
@@ -335,10 +335,10 @@ pub fn fim_find_auto_y_roll(img : Image) -> Int raise Failure {
 /// byte = floor(value * 255 + 0.5).  Returns a `Gray8` image.
 pub fn fim_to_grayscale8(
   img : Image,
-  invert? : Bool = true,
-  degamma? : Bool = false,
-  percentile_low? : Double? = Some(1.0),
-  percentile_high? : Double? = Some(99.0),
+  invert~ : Bool = true,
+  degamma~ : Bool = false,
+  percentile_low~ : Double? = Some(1.0),
+  percentile_high~ : Double? = Some(99.0),
 ) -> Image raise Failure {
   let w = img.width
   let h = img.height
@@ -391,8 +391,8 @@ pub fn fim_to_grayscale8(
 priv struct FimRatio {
   r : FixedArray[Double] // R = P_low / P_high; 0 = invalid (air / no signal)
   p_low : FixedArray[Double] // low-energy log attenuation ln(I0 / I_low)
-  w : Int
-  h : Int
+  w : Int32
+  h : Int32
   sig_ref : Double // 98th percentile of valid P_low (pseudo-color reference)
   norm_lo : Double
   norm_hi : Double
@@ -409,9 +409,9 @@ priv struct FimRatio {
 fn fim_compute_ratio(
   low : Image,
   high : Image,
-  i0_percentile? : Double = 99.0,
-  norm_low_pct? : Double = 2.0,
-  norm_high_pct? : Double = 98.0,
+  i0_percentile~ : Double = 99.0,
+  norm_low_pct~ : Double = 2.0,
+  norm_high_pct~ : Double = 98.0,
 ) -> FimRatio raise Failure {
   let w = low.width
   let h = low.height
@@ -615,7 +615,7 @@ fn fim_ln(x : Double) -> Double {
 
 ///|
 /// C# Math.Round / Python round: midpoint rounds to the nearest even value.
-fn fim_round_half_even(x : Double) -> Int {
+fn fim_round_half_even(x : Double) -> Int32 {
   let fl = x.floor()
   let d = x - fl
   if d > 0.5 {
@@ -631,7 +631,7 @@ fn fim_round_half_even(x : Double) -> Int {
 
 ///|
 /// Pseudo-color palette stops: dark blue -> cyan -> green -> yellow -> red.
-let fim_palette_stops : Array[(Double, Int, Int, Int)] = [
+let fim_palette_stops : Array[(Double, Int32, Int32, Int32)] = [
   (0.00, 0, 0, 96),
   (0.25, 0, 180, 255),
   (0.50, 60, 220, 60),
@@ -640,7 +640,7 @@ let fim_palette_stops : Array[(Double, Int, Int, Int)] = [
 ]
 
 ///|
-fn fim_palette_color(t : Double) -> (Int, Int, Int) {
+fn fim_palette_color(t : Double) -> (Int32, Int32, Int32) {
   let stops = fim_palette_stops
   if t <= stops[0].0 {
     return (stops[0].1, stops[0].2, stops[0].3)
@@ -697,7 +697,7 @@ fn fim_interp_hue(t : Double) -> Double {
 
 ///|
 /// h, s, v in [0, 1] -> 8-bit RGB.
-fn fim_hsv_to_rgb8(h : Double, s : Double, v : Double) -> (Int, Int, Int) {
+fn fim_hsv_to_rgb8(h : Double, s : Double, v : Double) -> (Int32, Int32, Int32) {
   let h6 = h * 6.0
   let mut i = h6.floor().to_int() % 6
   if i < 0 {

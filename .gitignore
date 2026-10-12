@@ -3,6 +3,7 @@ target/
 _build/
 .moonbit/
 .moonagent/
+pkg.generated.mbti
 
 # Mooncakes cache
 .mooncakes/

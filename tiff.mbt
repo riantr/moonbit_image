@@ -66,14 +66,21 @@ pub fn decode_tiff(data : Bytes) -> Image raise Failure {
     )
   }
   if planar != 1 {
-    raise Failure::Failure(
-      "TIFF: only chunky planar config (1) supported",
-    )
+    raise Failure::Failure("TIFF: only chunky planar config (1) supported")
   }
   match photometric {
-    0 | 1 => if samples != 1 { raise Failure::Failure("TIFF: greyscale needs SamplesPerPixel=1") }
-    2 => if samples != 3 { raise Failure::Failure("TIFF: RGB needs SamplesPerPixel=3") }
-    3 => if samples != 1 { raise Failure::Failure("TIFF: palette needs SamplesPerPixel=1") }
+    0 | 1 =>
+      if samples != 1 {
+        raise Failure::Failure("TIFF: greyscale needs SamplesPerPixel=1")
+      }
+    2 =>
+      if samples != 3 {
+        raise Failure::Failure("TIFF: RGB needs SamplesPerPixel=3")
+      }
+    3 =>
+      if samples != 1 {
+        raise Failure::Failure("TIFF: palette needs SamplesPerPixel=1")
+      }
     _ =>
       raise Failure::Failure(
         "TIFF: unsupported PhotometricInterpretation " + photometric.to_string(),
@@ -81,7 +88,10 @@ pub fn decode_tiff(data : Bytes) -> Image raise Failure {
   }
   match bits {
     1 | 2 | 4 | 8 | 16 => ()
-    _ => raise Failure::Failure("TIFF: unsupported BitsPerSample " + bits.to_string())
+    _ =>
+      raise Failure::Failure(
+        "TIFF: unsupported BitsPerSample " + bits.to_string(),
+      )
   }
 
   // Strip offsets / counts — we require exactly one strip covering the
@@ -116,44 +126,46 @@ pub fn decode_tiff(data : Bytes) -> Image raise Failure {
     (2, _) => PixelFormat::RGB8
     _ => abort("unreachable: photometric/bits validated above")
   }
-  let img = decode_strip(strip, width, height, bits, samples, photometric, palette)
+  let img = decode_strip(
+    strip, width, height, bits, samples, photometric, palette,
+  )
   Image::new(width, height, fmt, img)
 }
 
 // ----- Tag IDs (Adobe TIFF 6.0 §2) -----------------------------------------
 
 ///|
-const TAG_IMAGE_WIDTH : Int = 256
+const TAG_IMAGE_WIDTH : Int32 = 256
 
 ///|
-const TAG_IMAGE_LENGTH : Int = 257
+const TAG_IMAGE_LENGTH : Int32 = 257
 
 ///|
-const TAG_BITS_PER_SAMPLE : Int = 258
+const TAG_BITS_PER_SAMPLE : Int32 = 258
 
 ///|
-const TAG_COMPRESSION : Int = 259
+const TAG_COMPRESSION : Int32 = 259
 
 ///|
-const TAG_PHOTOMETRIC : Int = 262
+const TAG_PHOTOMETRIC : Int32 = 262
 
 ///|
-const TAG_STRIP_OFFSETS : Int = 273
+const TAG_STRIP_OFFSETS : Int32 = 273
 
 ///|
-const TAG_SAMPLES_PER_PIXEL : Int = 277
+const TAG_SAMPLES_PER_PIXEL : Int32 = 277
 
 ///|
-const TAG_ROWS_PER_STRIP : Int = 278
+const TAG_ROWS_PER_STRIP : Int32 = 278
 
 ///|
-const TAG_STRIP_BYTE_COUNTS : Int = 279
+const TAG_STRIP_BYTE_COUNTS : Int32 = 279
 
 ///|
-const TAG_PLANAR_CONFIG : Int = 284
+const TAG_PLANAR_CONFIG : Int32 = 284
 
 ///|
-const TAG_COLOR_MAP : Int = 320
+const TAG_COLOR_MAP : Int32 = 320
 
 // ----- IFD parsing ---------------------------------------------------------
 
@@ -161,18 +173,18 @@ const TAG_COLOR_MAP : Int = 320
 /// One parsed IFD entry, with values already resolved (i.e. indirect
 /// values have been fetched from the file).
 priv struct IfdEntry {
-  tag : Int
+  tag : Int32
   /// 1=BYTE, 2=ASCII, 3=SHORT, 4=LONG, 5=RATIONAL
-  typ : Int
-  count : Int
+  typ : Int32
+  count : Int32
   /// Resolved values — always a flat array of `count` entries, each
   /// entry is a 32-bit unsigned integer regardless of `typ`. SHORTs are
   /// zero-extended; RATIONALs are truncated to their numerator.
-  values : Array[Int]
+  values : Array[Int32]
 }
 
 ///|
-fn parse_ifd(data : Bytes, off : Int) -> Array[IfdEntry] raise Failure {
+fn parse_ifd(data : Bytes, off : Int32) -> Array[IfdEntry] raise Failure {
   if off + 2 > data.length() {
     raise Failure::Failure("TIFF: truncated IFD count")
   }
@@ -189,7 +201,7 @@ fn parse_ifd(data : Bytes, off : Int) -> Array[IfdEntry] raise Failure {
     let cnt = read_u32_le(data, e + 4)
     let raw = read_u32_le(data, e + 8)
     let values = resolve_value(data, typ, cnt, raw)
-    entries.push({ tag, typ, count: cnt, values })
+    entries.push({ tag, typ, count: cnt, values, })
   }
   entries
 }
@@ -199,10 +211,10 @@ fn parse_ifd(data : Bytes, off : Int) -> Array[IfdEntry] raise Failure {
 /// (when the total fits) or from the offset pointing into the file.
 fn resolve_value(
   data : Bytes,
-  typ : Int,
-  count : Int,
-  raw : Int,
-) -> Array[Int] raise Failure {
+  typ : Int32,
+  count : Int32,
+  raw : Int32,
+) -> Array[Int32] raise Failure {
   let size_per = match typ {
     1 | 2 => 1
     3 => 2
@@ -211,7 +223,7 @@ fn resolve_value(
     _ => raise Failure::Failure("TIFF: unsupported type " + typ.to_string())
   }
   let total = size_per * count
-  let values : Array[Int] = []
+  let values : Array[Int32] = []
   if total <= 4 {
     // Read everything inline from the 4-byte `raw` slot. We pack the
     // bytes little-endian into 32-bit integers.
@@ -219,8 +231,8 @@ fn resolve_value(
     let mut pos = 0
     while pos < count {
       let v = match typ {
-        1 | 2 => base >> (pos * 8) & 0xFF
-        3 => base >> (pos * 2 * 8) & 0xFFFF
+        1 | 2 => (base >> (pos * 8)) & 0xFF
+        3 => (base >> (pos * 2 * 8)) & 0xFFFF
         4 => base
         _ => 0
       }
@@ -258,7 +270,7 @@ fn resolve_value(
 
 ///|
 /// Find an IFD entry by tag. Returns None if the tag is absent.
-fn find_entry(entries : Array[IfdEntry], tag : Int) -> IfdEntry? {
+fn find_entry(entries : Array[IfdEntry], tag : Int32) -> IfdEntry? {
   for e in entries {
     if e.tag == tag {
       return Some(e)
@@ -270,14 +282,9 @@ fn find_entry(entries : Array[IfdEntry], tag : Int) -> IfdEntry? {
 ///|
 /// Read a tag's first value as a uint32. Returns `default` if the tag
 /// is absent.
-fn get_long(entries : Array[IfdEntry], tag : Int) -> Int {
+fn get_long(entries : Array[IfdEntry], tag : Int32) -> Int32 {
   match find_entry(entries, tag) {
-    Some(e) =>
-      if e.values.length() > 0 {
-        e.values[0]
-      } else {
-        0
-      }
+    Some(e) => if e.values.length() > 0 { e.values[0] } else { 0 }
     None => 0
   }
 }
@@ -285,7 +292,7 @@ fn get_long(entries : Array[IfdEntry], tag : Int) -> Int {
 ///|
 /// Read a tag's first value as a uint16 (zero-extended). Returns
 /// `default` if the tag is absent or its first value exceeds 0xFFFF.
-fn get_short(entries : Array[IfdEntry], tag : Int, default : Int) -> Int {
+fn get_short(entries : Array[IfdEntry], tag : Int32, default : Int32) -> Int32 {
   match find_entry(entries, tag) {
     Some(e) =>
       if e.values.length() > 0 {
@@ -304,7 +311,7 @@ fn get_short(entries : Array[IfdEntry], tag : Int, default : Int) -> Int {
 
 ///|
 /// Read a tag's full value array. Each entry is widened to uint32.
-fn get_long_array(entries : Array[IfdEntry], tag : Int) -> Array[Int] {
+fn get_long_array(entries : Array[IfdEntry], tag : Int32) -> Array[Int32] {
   match find_entry(entries, tag) {
     Some(e) => e.values
     None => []
@@ -318,7 +325,7 @@ fn get_long_array(entries : Array[IfdEntry], tag : Int) -> Array[Int] {
 /// consumers interpret TIFF palettes.
 fn read_color_map(
   entries : Array[IfdEntry],
-  num_colors : Int,
+  num_colors : Int32,
 ) -> Array[Color] raise Failure {
   match find_entry(entries, TAG_COLOR_MAP) {
     Some(e) => {
@@ -347,11 +354,11 @@ fn read_color_map(
 /// caller via the ImageFormat of the returned Image).
 fn decode_strip(
   strip : Bytes,
-  width : Int,
-  height : Int,
-  bits : Int,
-  samples : Int,
-  photometric : Int,
+  width : Int32,
+  height : Int32,
+  bits : Int32,
+  samples : Int32,
+  photometric : Int32,
   palette : Array[Color],
 ) -> Bytes raise Failure {
   match (photometric, bits, samples) {
@@ -423,10 +430,10 @@ fn shrink_rgb16_to_8(strip : Bytes) -> Bytes raise Failure {
 /// flipping each nibble/bit (255 - v).
 fn unpack_subbyte_greyscale(
   strip : Bytes,
-  width : Int,
-  height : Int,
-  bits : Int,
-  photometric : Int,
+  width : Int32,
+  height : Int32,
+  bits : Int32,
+  photometric : Int32,
 ) -> Bytes raise Failure {
   let total = width * height
   let arr = Array::make(total, b'\x00')
@@ -448,7 +455,11 @@ fn unpack_subbyte_greyscale(
 ///|
 /// Read the `bits`-wide sample at pixel index `i` from a packed
 /// little-endian bitstream.
-fn extract_subbyte(strip : Bytes, i : Int, bits : Int) -> Int raise Failure {
+fn extract_subbyte(
+  strip : Bytes,
+  i : Int32,
+  bits : Int32,
+) -> Int32 raise Failure {
   let bit_off = i * bits
   let byte_off = bit_off / 8
   let inner = bit_off % 8
@@ -464,7 +475,11 @@ fn extract_subbyte(strip : Bytes, i : Int, bits : Int) -> Int raise Failure {
     // nibble in the next byte — already handled above for 4-bit
     // because i*4 makes inner either 0 or 4, both ≤ 8. Still,
     // defensive: cross-byte extract.)
-    let lo = if byte_off < strip.length() { strip[byte_off].to_int() } else { 0 }
+    let lo = if byte_off < strip.length() {
+      strip[byte_off].to_int()
+    } else {
+      0
+    }
     let hi = if byte_off + 1 < strip.length() {
       strip[byte_off + 1].to_int()
     } else {
@@ -481,20 +496,16 @@ fn extract_subbyte(strip : Bytes, i : Int, bits : Int) -> Int raise Failure {
 /// in `palette`.
 fn unpack_palette(
   strip : Bytes,
-  width : Int,
-  height : Int,
-  bits : Int,
+  width : Int32,
+  height : Int32,
+  bits : Int32,
   palette : Array[Color],
 ) -> Bytes raise Failure {
   let total = width * height
   let arr = Array::make(total * 4, b'\x00')
   for i = 0; i < total; i = i + 1 {
     let idx = extract_subbyte(strip, i, bits)
-    let c = if idx < palette.length() {
-      palette[idx]
-    } else {
-      Color::default()
-    }
+    let c = if idx < palette.length() { palette[idx] } else { Color::default() }
     let d = i * 4
     arr[d] = c.r.to_byte()
     arr[d + 1] = c.g.to_byte()
