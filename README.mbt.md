@@ -4,6 +4,27 @@ Pure-MoonBit image decoder / encoder covering **BMP / QOI / TGA / PNG / GIF / JP
 
 This package is forked from [`lws/moonbit_image`](https://github.com/Milky2018/moonbit-image) (MIT, 2025). The original sources were vendored inside `moonbit-labeler/extensions/image/`; this package repackages them as a standalone `mooncakes.io` library so the labeler and any other MoonBit project can depend on a single shared implementation.
 
+## What's new in 0.3.8
+
+Two independent fixes, no change to the decoding behaviour.
+
+**The package compiles against the current MoonBit core again.** The core
+removed the `try?` operator, and 0.3.7 used it in six places in `lib.mbt` and
+`lib_test.mbt` — so a `moon add riantr/moonbit_image@0.3.7` against a current
+toolchain resolved to a package that did not compile. 0.3.8 rewrites those
+sites as `expr catch { e => Err(e) }`, which is the same expression the core
+now expects. The error surface is unchanged: `decode` still raises
+`DecodeError::UnsupportedFormat` for an unknown magic and
+`DecodeError::InvalidHeader` for a broken header, and the same 43 tests pass.
+
+**js and wasm-gc are supported targets, not just native.** 0.3.7 declared
+`supported_targets = "native"`, so any project building for the browser or
+for wasm could not depend on it — the consumer had to vendor a copy of the
+sources instead. This package is pure MoonBit with no FFI, so there was never
+a technical reason for the restriction. 0.3.8 declares
+`+native+js+wasm-gc`, and the release CI type-checks all three targets before
+it publishes.
+
 ## What's new in 0.3.6
 
 Adds the **FIM** codec — CETC BVE-series X-ray security-scanner raw detector streams (`.fim`). The `.fim` format is a 230-byte little-endian header followed by a column-major 16-bit little-endian payload; the scanner interleaves the two dual-energy exposures on the time axis, so the even and odd ROWS of the decoded image are the low- and high-energy halves. Zero new dependencies — the decoder uses the package's `Image` / `PixelFormat` / `read_u32_le` primitives and a hand-rolled natural log.
@@ -170,6 +191,7 @@ pub fn encode_bmp(image : Image) -> Bytes raise Failure
 
 ```mbt nocheck
 // decode a JPEG -> Image, resize, re-encode as QOI
+
 ///|
 let img = @moonbit_image.decode(jpeg_bytes) catch {
   err => {
@@ -187,7 +209,7 @@ let qoi = @moonbit_image.encode(half, ImageFormat::QOI)
 
 ## Tests
 
-`moon test --target native` runs the white-box tests in `lib_test.mbt` (43 tests across format detection for all 9 codecs, header reading, decode round-trips for QOI + BMP, FIM detect/dimensions/decode on a synthesized 1×2 detector, colour math, geometric transforms, and a fuzz sweep over random pixels / random crops). Black-box tests live in `qa/`.
+`moon test --target native` runs the white-box tests in `lib_test.mbt` (43 tests across format detection for all 9 codecs, header reading, decode round-trips for QOI + BMP, FIM detect/dimensions/decode on a synthesized 1×2 detector, colour math, geometric transforms, and a fuzz sweep over random pixels / random crops).
 
 ## License
 
@@ -208,3 +230,4 @@ under the MIT license.
 - Original sources © 2025 lws, MIT — see upstream history at https://github.com/Milky2018/moonbit-image.
 - 0.2.0 revisions (DecodeError, JPEG chroma fix, API cleanup) © 2026 RiantR, MIT.
 - 0.3.7 license consolidation (drop Apache-2.0 dual grant) © 2026 RiantR, MIT.
+- 0.3.8 core compatibility (`try?` removal) and js / wasm-gc targets © 2026 RiantR, MIT.
