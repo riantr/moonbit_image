@@ -147,9 +147,11 @@ test "detect_format + ImageFormat::is_decodable covers every recognised format" 
 
 ///|
 test "blackbox: decode(unknown) raises DecodeError::UnsupportedFormat" {
-  let bogus : Result[Image, DecodeError] = try Ok(decode(
-    b"definitely not an image",
-  )) catch { e => Err(e) }
+  let bogus : Result[Image, DecodeError] = Ok(
+    decode(b"definitely not an image"),
+  ) catch {
+    e => Err(e)
+  }
   match bogus {
     Err(DecodeError::UnsupportedFormat(_)) => assert_true(true)
     _ => fail("expected UnsupportedFormat")
@@ -159,9 +161,11 @@ test "blackbox: decode(unknown) raises DecodeError::UnsupportedFormat" {
 ///|
 test "blackbox: decode(corrupt BMP) raises DecodeError::InvalidHeader" {
   // Valid "BM" magic followed by an empty / under-sized dib header.
-  let r : Result[Image, DecodeError] = try Ok(decode(
-    b"BM\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
-  )) catch { e => Err(e) }
+  let r : Result[Image, DecodeError] = Ok(
+    decode(b"BM\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"),
+  ) catch {
+    e => Err(e)
+  }
   match r {
     Err(DecodeError::InvalidHeader(_)) => assert_true(true)
     Err(_) => fail("wrong DecodeError variant (expected InvalidHeader)")
