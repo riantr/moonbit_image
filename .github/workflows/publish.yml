@@ -1,0 +1,268 @@
+name: publish
+
+# Publishes the root module (riantr/moonbit_image) to mooncakes.io.
+#
+# A tag that exists IS the release request: a `v*` tag push runs this
+# workflow, and the gates below decide whether anything is actually
+# published. There is no branch trigger and no hand-published release.
+#
+# `workflow_dispatch` exists for the one case a tag push cannot cover: a
+# tag that was pushed before this workflow existed will never re-fire a
+# tag-push trigger, and deleting + re-pushing a tag other people may have
+# already fetched is worse than dispatching this by hand.
+#
+# TO ENABLE: set the secret under
+#     Settings -> Secrets and variables -> Actions
+# as MOONCAKES_RIANTR_TOKEN. The publish step fails fast and loudly when it
+# is absent, by design - a silent skip would look like a successful release.
+#
+# The secret's VALUE is the whole contents of ~/.moon/credentials.json, not
+# the bare token. `moon publish` reads that path, and the file is a JSON
+# object with two fields:
+#
+#     { "token": "<...>", "username": "riantr" }
+#
+# so pasting only the token writes an invalid credentials.json and moon
+# publish then fails with the same opaque non-zero exit as a genuine
+# rejection. Copy the file (it lands there after `moon login`), not one
+# field of it.
+#
+# To cut a release:
+#   1. set version in moon.mod
+#   2. sync every version reference in README.mbt.md
+#   3. commit, push to gitee (daily remote) and github
+#   4. git tag -a v<version> -m "..." && git push github v<version>
+#
+# Step 4 is what triggers this. A tag pushed to gitee alone does nothing.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version already set in moon.mod, e.g. 0.3.8"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  # One publish at a time. cancel-in-progress: false matters - cancelling a
+  # half-finished publish would leave the registry in a state we cannot
+  # reason about.
+  group: mooncakes-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-22.04
+    # Pinned, not ubuntu-latest: the floating label migrates to a newer
+    # Ubuntu, and a release toolchain should not change under you between
+    # two tags of the same package.
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install moon
+        # The official install script, not a setup action: moonbitlang/setup-moonbit
+        # does not exist (404), and actions a workflow references are resolved
+        # during job setup, before any step is named in the log.
+        #
+        # The path is install/unix.sh, not install.sh - install.sh answers 403
+        # from a GitHub runner. The .cn mirror is a fallback for when the .com
+        # host is unreachable.
+        run: |
+          set -euo pipefail
+          { curl -fsSL https://cli.moonbitlang.com/install/unix.sh \
+            || curl -fsSL https://cli.moonbitlang.cn/install/unix.sh; } \
+            > /tmp/moon-install.sh
+          test -s /tmp/moon-install.sh
+          bash /tmp/moon-install.sh
+          echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.moon/bin:$PATH"
+          command -v moon >/dev/null || {
+            echo "::error::moon is still not on PATH after the install script"
+            exit 1
+          }
+          moon version --all
+
+      - name: Resolve the registry index
+        # A fresh runner's index is empty, and the core is a registry
+        # dependency, so the gates below would fail to resolve it without
+        # this.
+        run: moon update
+
+      # The single most useful guard in this workflow. A tag that disagrees
+      # with moon.mod publishes the wrong thing silently: moon publishes
+      # whatever version moon.mod says, and the tag is just a label nobody
+      # checks against it.
+      - name: Resolve and check the release version
+        id: version
+        env:
+          DISPATCH_VERSION: ${{ inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -eu
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            release="$DISPATCH_VERSION"
+          else
+            release="${REF_NAME#v}"
+          fi
+          actual=$(grep -E '^version' moon.mod | head -1 | cut -d'"' -f2)
+          echo "release requested : $release"
+          echo "moon.mod says     : $actual"
+          if [ "$release" != "$actual" ]; then
+            echo "::error::Tag/dispatch version '$release' does not match moon.mod '$actual'."
+            echo "::error::The registry publishes moon.mod's value, not the tag's."
+            exit 1
+          fi
+          echo "version=$release" >> "$GITHUB_OUTPUT"
+
+      - name: Check typos
+        # Cheap, and it has historically been the step that actually fails in
+        # this ecosystem - the token was usually fine and the typo gate was
+        # not. Run it first so the failure is the first thing in the log.
+        uses: crate-ci/typos@master
+
+      # `moon fmt --check` is deliberately NOT used here. On Windows it
+      # shells out to `git diff --no-index` with a `\\?\` long-path prefix
+      # that git cannot open, so it fails on a perfectly formatted tree.
+      # Formatting the tree and asking git whether anything moved is the
+      # same check, expressed so that it works on every platform.
+      - name: The sources must already be canonically formatted
+        run: |
+          set -euo pipefail
+          moon fmt
+          if ! git diff --quiet -- '*.mbt'; then
+            echo "::error::moon fmt changed the sources - they are not canonically"
+            echo "::error::formatted. Commit the formatted files before tagging."
+            git diff --stat -- '*.mbt'
+            exit 1
+          fi
+          echo "ok  moon fmt is a no-op on the committed sources"
+
+      - name: Gate
+        run: |
+          set -euo pipefail
+          moon check --target native
+          moon test --target native
+          # 0.3.8 declares +native+js+wasm-gc. A target set that is claimed
+          # in moon.mod but never compiled is an unverified claim, so all
+          # three are type-checked before the package is published. `check`
+          # and not `build`: building for js needs a node toolchain, and
+          # type-checking is what proves the source is valid for the target.
+          moon check --target js
+          moon check --target wasm-gc
+
+      - name: Write mooncakes credentials
+        env:
+          MOON_CAKES_CREDENTIALS: ${{ secrets.MOONCAKES_RIANTR_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "$MOON_CAKES_CREDENTIALS" ]; then
+            echo "::error::MOONCAKES_RIANTR_TOKEN is not set on this repository."
+            echo "::error::moon publish cannot authenticate. Nothing was published."
+            exit 1
+          fi
+          mkdir -p "$HOME/.moon"
+          printf '%s' "$MOON_CAKES_CREDENTIALS" > "$HOME/.moon/credentials.json"
+          trap 'rm -f "$HOME/.moon/credentials.json"' EXIT
+          python3 - <<'PY'
+          import json, os, sys
+          path = os.path.expanduser("~/.moon/credentials.json")
+          try:
+              with open(path, encoding="utf-8") as fh:
+                  doc = json.load(fh)
+          except Exception as exc:
+              print(f"::error::the secret is not valid JSON: {exc}")
+              sys.exit(1)
+          if not isinstance(doc, dict) or not doc.get("token"):
+              print("::error::the secret has no non-empty 'token' field")
+              sys.exit(1)
+          # Key names and the token's length only. Never its value.
+          print("credentials valid: keys=" + str(sorted(doc.keys())) +
+                " token length=" + str(len(doc["token"])))
+          PY
+
+      # `moon publish --dry-run` really authenticates (a bad token yields
+      # "Server status: 401 Unauthorized, detail: Invalid API token") but
+      # has no registry side effects, so a credential failure is caught here
+      # rather than half way through a publish.
+      #
+      # The exit code is NOT a signal. Measured on moon 0.1.20261016 against
+      # mooncakes.io with a working token, a fully successful dry run prints
+      #
+      #     Check passed
+      #     Server status: 202 Accepted, detail: Dry run completed
+      #     successfully. No changes were made. ...
+      #     Error: `moon publish` failed
+      #
+      # and still exits non-zero. The CLI appears to read the dry run's "no
+      # changes" state as a failed publish. So the exit code is discarded
+      # and the decision is made on the server's own response text, which
+      # does distinguish the two cases: 202 means the token was accepted.
+      #
+      # `2>&1` matters - this CLI writes these lines to stderr, so a
+      # stdout-only capture would see an empty log and fail the grep.
+      - name: Verify credentials (dry run)
+        run: |
+          set -uo pipefail
+          moon publish --dry-run --verbose 2>&1 | tee dryrun.log || true
+          if grep -q "Server status: 202 Accepted" dryrun.log; then
+            echo "credentials accepted by the server (dry run, no side effects)"
+          else
+            echo "::error::the dry run did not confirm credentials with the server"
+            grep -E "Server status|Error" dryrun.log || echo "(no server response in the log)"
+            exit 1
+          fi
+
+      # Same reasoning applies to the real publish, and it is safer to
+      # assume the same bug is present until it is measured otherwise: if
+      # `moon publish` also reports failure on a successful upload, failing
+      # the job here would mark a completed release as broken and never
+      # reach the registry check below.
+      #
+      # Swallowing the exit code is only safe because the next step is the
+      # authority: `moon view --versions` reads mooncakes.io with no
+      # credentials at all. If the upload really did fail, the version will
+      # not be in that listing and the job fails there instead.
+      - name: Publish
+        run: |
+          set -uo pipefail
+          moon publish --verbose 2>&1 | tee publish.log \
+            || echo "::warning::moon publish exited $? - the registry check below is authoritative"
+
+      # The authority for whether anything actually landed. It reads
+      # mooncakes.io with no credentials at all, so it cannot be fooled by
+      # a publish command that reported success or failure.
+      #
+      # `grep -qx`, not `grep`: the match is anchored to a whole line
+      # because `moon view --versions` prints one version per line, and an
+      # unanchored substring match is the exact failure this workflow
+      # exists to prevent - checking for `0.3.8` would also match `0.3.80`.
+      - name: Verify the version is on the registry
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          echo "published versions of riantr/moonbit_image:"
+          moon view riantr/moonbit_image --versions
+          if moon view riantr/moonbit_image --versions | grep -qx "$VERSION"; then
+            echo "::notice::$VERSION is live on mooncakes.io"
+          else
+            echo "::error::$VERSION does not appear in the registry listing above"
+            exit 1
+          fi
+
+      - name: Create GitHub release
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "moonbit_image ${GITHUB_REF_NAME#v}" \
+            --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}

@@ -8,6 +8,9 @@ pkg.generated.mbti
 # Mooncakes cache
 .mooncakes/
 
+# Local publish logs (failed local `moon publish` attempts)
+publish_*.log
+
 # Editor / OS noise
 .DS_Store
 Thumbs.db

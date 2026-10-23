@@ -1,0 +1,38 @@
+# typos configuration for riantr/moonbit_image.
+#
+# The release workflow gates on `typos`, which is worth keeping: it is cheap
+# and it has historically been the step that actually fails in this
+# ecosystem. But a gate that fires on correct text trains people to ignore
+# it, so the known-good tokens are declared here instead of being "fixed"
+# in the source.
+#
+# BVE   - "CETC BVE-series" is the product line name of the X-ray security
+#         scanner whose raw detector stream the FIM codec decodes. A model
+#         designation, not a misspelling of "BE".
+#
+# PN    - typos splits the identifier "PNGs" into "PN" + "Gs" and then
+#         reports "PN" as a typo of "ON", which it is not: "PNGs" is the
+#         ordinary plural of PNG.
+#
+# PAETH - the Paeth predictor, the PNG filter function named after its
+#         author. It is a proper noun in the PNG specification.
+#
+# nd    - number of distance codes, the PNG/zlib dynamic-Huffman block
+#         header field (the sibling field is "nl", number of literal codes).
+#
+# cll   - code length code lengths: the PNG/zlib table that codes the code
+#         lengths. Its siblings in the same function are "clord" (the code
+#         length order) and "clt" (the tree built from it).
+#
+# clen  - code length, the length in bits of one Huffman code.
+#
+# mis   - "mis-position", an ordinary hyphenated word.
+
+[default.extend-words]
+BVE = "BVE"
+PN = "PN"
+PAETH = "PAETH"
+nd = "nd"
+cll = "cll"
+clen = "clen"
+mis = "mis"
