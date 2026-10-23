@@ -5,4 +5,4 @@
 import {
 }
 
-supported_targets = "native"
+supported_targets = "+native+js+wasm-gc"

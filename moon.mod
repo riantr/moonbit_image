@@ -30,5 +30,5 @@ description = "Pure-MoonBit image decoder/encoder covering BMP / QOI / TGA / PNG
 options(
   warn_list: "",
   preferred_target: "native",
-  supported_targets: "+native",
+  supported_targets: "+native+js+wasm-gc",
 )
