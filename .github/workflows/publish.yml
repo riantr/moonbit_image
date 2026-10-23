@@ -171,7 +171,6 @@ jobs:
           fi
           mkdir -p "$HOME/.moon"
           printf '%s' "$MOON_CAKES_CREDENTIALS" > "$HOME/.moon/credentials.json"
-          trap 'rm -f "$HOME/.moon/credentials.json"' EXIT
           python3 - <<'PY'
           import json, os, sys
           path = os.path.expanduser("~/.moon/credentials.json")
@@ -234,6 +233,11 @@ jobs:
       - name: Publish
         run: |
           set -uo pipefail
+          # The credentials file is removed when this step ends, on success and
+          # on failure alike. It must NOT be removed at the end of the step
+          # that writes it: the dry run above reads the same file, and a trap
+          # there deletes it before the dry run gets to it.
+          trap 'rm -f "$HOME/.moon/credentials.json"' EXIT
           moon publish --verbose 2>&1 | tee publish.log \
             || echo "::warning::moon publish exited $? - the registry check below is authoritative"
 
