@@ -181,7 +181,7 @@ pub fn decode(data : Bytes) -> Image raise DecodeError {
   match detect_format(data) {
     None => raise DecodeError::UnsupportedFormat("unknown image format")
     Some(format) =>
-      match (try? decode_by_format_raw(data, format)) {
+      match (try Ok(decode_by_format_raw(data, format)) catch { e => Err(e) }) {
         Ok(img) => img
         Err(Failure::Failure(msg)) => raise DecodeError::InvalidHeader(msg)
       }
@@ -196,7 +196,7 @@ pub fn decode_by_format(
   data : Bytes,
   format : ImageFormat,
 ) -> Image raise DecodeError {
-  match (try? decode_by_format_raw(data, format)) {
+  match (try Ok(decode_by_format_raw(data, format)) catch { e => Err(e) }) {
     Ok(img) => img
     Err(Failure::Failure(msg)) => raise DecodeError::InvalidHeader(msg)
   }
@@ -236,7 +236,7 @@ pub fn image_dimensions(
   match detect_format(data) {
     None => raise DecodeError::UnsupportedFormat("unknown image format")
     Some(format) =>
-      match (try? image_dimensions_raw(data, format)) {
+      match (try Ok(image_dimensions_raw(data, format)) catch { e => Err(e) }) {
         Ok(dims) => dims
         Err(Failure::Failure(msg)) => raise DecodeError::InvalidHeader(msg)
       }
@@ -385,12 +385,12 @@ pub fn image_format_name(format : ImageFormat) -> String {
 pub fn encode(img : Image, format : ImageFormat) -> Bytes raise DecodeError {
   match format {
     ImageFormat::BMP =>
-      match (try? encode_bmp(img)) {
+      match (try Ok(encode_bmp(img)) catch { e => Err(e) }) {
         Ok(bytes) => bytes
         Err(Failure::Failure(msg)) => raise DecodeError::InvalidHeader(msg)
       }
     ImageFormat::QOI =>
-      match (try? encode_qoi(img)) {
+      match (try Ok(encode_qoi(img)) catch { e => Err(e) }) {
         Ok(bytes) => bytes
         Err(Failure::Failure(msg)) => raise DecodeError::InvalidHeader(msg)
       }
