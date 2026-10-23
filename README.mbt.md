@@ -4,18 +4,30 @@ Pure-MoonBit image decoder / encoder covering **BMP / QOI / TGA / PNG / GIF / JP
 
 This package is forked from [`lws/moonbit_image`](https://github.com/Milky2018/moonbit-image) (MIT, 2025). The original sources were vendored inside `moonbit-labeler/extensions/image/`; this package repackages them as a standalone `mooncakes.io` library so the labeler and any other MoonBit project can depend on a single shared implementation.
 
+## What's new in 0.3.9
+
+Documentation-only release. The code is byte-identical to 0.3.8.
+
+The 0.3.8 release note said that 0.3.7 used the removed `try?` operator "in
+six places". The count was wrong: there are seven - five in `lib.mbt` and two
+in `lib_test.mbt`. The note no longer states a count, and it now says how to
+reproduce the breakage instead.
+
 ## What's new in 0.3.8
 
 Two independent fixes, no change to the decoding behaviour.
 
 **The package compiles against the current MoonBit core again.** The core
-removed the `try?` operator, and 0.3.7 used it in six places in `lib.mbt` and
+removed the `try?` operator, and 0.3.7 used it in `lib.mbt` and
 `lib_test.mbt` — so a `moon add riantr/moonbit_image@0.3.7` against a current
 toolchain resolved to a package that did not compile. 0.3.8 rewrites those
 sites as `expr catch { e => Err(e) }`, which is the same expression the core
 now expects. The error surface is unchanged: `decode` still raises
 `DecodeError::UnsupportedFormat` for an unknown magic and
 `DecodeError::InvalidHeader` for a broken header, and the same 43 tests pass.
+
+To see the breakage for yourself, unpack the published 0.3.7 archive and run
+`moon check` in it: it fails with `Error: [3002] try? has been removed`.
 
 **js and wasm-gc are supported targets, not just native.** 0.3.7 declared
 `supported_targets = "native"`, so any project building for the browser or
