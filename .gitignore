@@ -10,6 +10,7 @@ pkg.generated.mbti
 
 # Local publish logs (failed local `moon publish` attempts)
 publish_*.log
+pub_*.log
 
 # Editor / OS noise
 .DS_Store
