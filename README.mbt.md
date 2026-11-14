@@ -4,6 +4,31 @@ Pure-MoonBit image decoder / encoder covering **BMP / QOI / TGA / PNG / GIF / JP
 
 This package is forked from [`lws/moonbit_image`](https://github.com/Milky2018/moonbit-image) (MIT, 2025). The original sources were vendored inside `moonbit-labeler/extensions/image/`; this package repackages them as a standalone `mooncakes.io` library so the labeler and any other MoonBit project can depend on a single shared implementation.
 
+## What's new in 0.3.10
+
+**`detect_format()` no longer crashes on TGA files that carry a v2 footer.**
+
+`detect_tga()` scanned the 17-byte `TRUEVISION-XFILE.` footer signature with
+a hard-coded 18-byte loop, so the last iteration indexed one byte past the
+end of the signature and panicked with an out-of-bounds access. Every TGA
+file with the standard v2 footer hit it — including all three samples under
+`testdata/tga/` — which meant `detect_format()` and `decode()` aborted
+instead of returning an image. The bounds are now derived from the
+signature's own length, and the reserved byte that follows the signature is
+accounted for when the footer offset is computed.
+
+The bug dates back to the vendored import and was never covered by a test.
+
+**Decode tests for JPEG, PNG, GIF and TGA.** Those four codecs had no
+`decode_*` coverage at all; the suite only exercised ICO, TIFF and FIM
+through a decode entry point. `lib_test_codecs.mbt` adds 25 tests over the
+real `testdata/` samples — PNG (1×1 RGBA, 16×16 indexed → RGBA8, 32×32 RGBA),
+GIF (1×1, 32×32, plus the 8×8 animated sample through `decode_gif_all`),
+TGA (1×1 24-bit, 32×32 grayscale → Gray8, 32×32 RGBA) and JPEG (1×1 plus two
+64×64 baseline samples) — together with the unified `decode()` routing, the
+`image_dimensions()` fast path and the `is_decodable()` matrix for all nine
+formats. The test suite goes from 43 to 70 tests.
+
 ## What's new in 0.3.9
 
 Documentation-only release. The code is byte-identical to 0.3.8.
@@ -250,3 +275,4 @@ under the MIT license.
 - 0.2.0 revisions (DecodeError, JPEG chroma fix, API cleanup) © 2026 RiantR, MIT.
 - 0.3.7 license consolidation (drop Apache-2.0 dual grant) © 2026 RiantR, MIT.
 - 0.3.8 core compatibility (`try?` removal) and js / wasm-gc targets © 2026 RiantR, MIT.
+- 0.3.10 TGA v2-footer detection fix and the JPEG / PNG / GIF / TGA decode tests © 2026 RiantR, MIT.
