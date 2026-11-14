@@ -210,6 +210,35 @@ test "blackbox: detect_format rejects 7-byte (under PNG sig length)" {
 // ---------------------------------------------------------------------------
 
 ///|
+/// A 1x1 24-bit TGA carrying the standard TGA v2 footer
+/// ("TRUEVISION-XFILE." + reserved byte) at the end of the file.
+fn tga_tiny_with_v2_footer() -> Bytes {
+  b"\x00\x00\x02\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01\x00\x01\x00\x18\x00\x00\xFF\x00\x00\x00\x00\x00\x00\x00\x00\x00TRUEVISION-XFILE.\x00"
+}
+
+///|
+test "tga: detect_format picks up a TGA v2 footer without panicking" {
+  // Regression: detect_tga() hard-coded an 18-byte scan over the
+  // 17-byte "TRUEVISION-XFILE." signature and indexed one past its end,
+  // so every TGA file carrying the standard v2 footer crashed with an
+  // out-of-bounds access instead of being detected.
+  let bytes = tga_tiny_with_v2_footer()
+  match detect_format(bytes) {
+    Some(f) => assert_eq(image_format_name(f), "TGA")
+    None => fail("detect_format missed the TGA v2 footer")
+  }
+}
+
+///|
+test "tga: decode_tga reads a 1x1 TGA with the v2 footer" {
+  let img = decode_tga(tga_tiny_with_v2_footer()) catch {
+    _ => fail("decode_tga raised on a footer-bearing TGA")
+  }
+  assert_eq(img.width, 1)
+  assert_eq(img.height, 1)
+}
+
+///|
 test "ico: detect_format picks up Windows ICO header" {
   let bytes = fixture_ico_png_16x16()
   assert_true(bytes.length() > 6)

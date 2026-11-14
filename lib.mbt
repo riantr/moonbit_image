@@ -109,12 +109,22 @@ fn detect_tga(data : Bytes) -> Bool {
 
   // Method 1: Check for TGA version 2 footer at end of file
   // Footer signature: "TRUEVISION-XFILE." at position len-18
+  //
+  // The signature is 17 bytes, and it sits one byte before the end of the
+  // file (the trailing reserved byte), so it starts at len - (17 + 1).
+  // The bounds below are derived from footer_sig.length() rather than
+  // hard-coded 17/18 — the previous hard-coded `i < 18` walked one past
+  // the end of the 17-byte signature and panicked with an out-of-bounds
+  // index on every TGA file that carries the standard v2 footer.
   let footer_sig = "TRUEVISION-XFILE."
+  let sig_len = footer_sig.length()
   let len = data.length()
-  if len >= 26 {
-    let footer_start = len - 18
+  // A v2 footer is 26 bytes: 4-byte extension-area offset, 4-byte
+  // developer-directory offset, the 17-byte signature, 1 reserved byte.
+  if len >= sig_len + 9 {
+    let footer_start = len - (sig_len + 1)
     let mut matches = true
-    for i = 0; i < 18; i = i + 1 {
+    for i = 0; i < sig_len; i = i + 1 {
       if data[footer_start + i] != footer_sig[i].to_byte() {
         matches = false
         break
