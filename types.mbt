@@ -416,6 +416,77 @@ fn BitReader::read_bits(
 }
 
 ///|
+/// Read up to `n` bits (at most 16), stopping at the end of the data
+/// instead of raising. Returns the reader, the value and the number of
+/// bits that were actually available.
+///
+/// A DEFLATE stream ends with the last symbol followed by padding
+/// bits, so the final read is routinely short: the bits that *are*
+/// there still have to be delivered. `read_bits` cannot do that - it
+/// raises as soon as the data runs out, and the bits it had already
+/// consumed on the way are lost with it.
+fn BitReader::read_bits_upto(
+  self : BitReader,
+  n : Int32,
+) -> (BitReader, Int32, Int32) {
+  if n <= 0 {
+    return (self, 0, 0)
+  }
+  let mut reader = self
+  let mut result = 0
+  let mut result_pos = 0
+  let mut needed = n
+
+  // The remaining bits of the current partial byte.
+  if reader.bit_pos != 0 {
+    let bits_left = 8 - reader.bit_pos
+    let take = if needed < bits_left { needed } else { bits_left }
+    if reader.byte_pos >= reader.data.length() {
+      return (reader, result, result_pos)
+    }
+    let byte = reader.data[reader.byte_pos].to_int()
+    let val = (byte >> reader.bit_pos) & ((1 << take) - 1)
+    result = result | (val << result_pos)
+    result_pos = result_pos + take
+    needed = needed - take
+    if take == bits_left {
+      reader = { data: reader.data, byte_pos: reader.byte_pos + 1, bit_pos: 0, }
+    } else {
+      reader = {
+        data: reader.data,
+        byte_pos: reader.byte_pos,
+        bit_pos: reader.bit_pos + take,
+      }
+    }
+  }
+
+  // Whole bytes.
+  while needed >= 8 {
+    if reader.byte_pos >= reader.data.length() {
+      return (reader, result, result_pos)
+    }
+    let byte_val = reader.data[reader.byte_pos].to_int()
+    result = result | (byte_val << result_pos)
+    result_pos = result_pos + 8
+    needed = needed - 8
+    reader = { data: reader.data, byte_pos: reader.byte_pos + 1, bit_pos: 0, }
+  }
+
+  // The last, partial byte.
+  if needed > 0 {
+    if reader.byte_pos >= reader.data.length() {
+      return (reader, result, result_pos)
+    }
+    let byte = reader.data[reader.byte_pos].to_int()
+    let val = byte & ((1 << needed) - 1)
+    result = result | (val << result_pos)
+    result_pos = result_pos + needed
+    reader = { data: reader.data, byte_pos: reader.byte_pos, bit_pos: needed, }
+  }
+  (reader, result, result_pos)
+}
+
+///|
 /// Align to the next byte boundary
 fn BitReader::align_to_byte(self : BitReader) -> BitReader {
   if self.bit_pos == 0 {

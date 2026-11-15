@@ -200,14 +200,18 @@ fn TgaDecoder::decode_rle(self : TgaDecoder) -> Image raise Failure {
     }
     let packet_header = self.data[pos].to_int()
     pos = pos + 1
-    let packet_type = (packet_header >> 7) & 1 // 1 = RLE, 0 = raw
+    // Bit 7 of the packet header selects the packet kind: it is SET for
+    // a run-length packet (the single pixel that follows is repeated)
+    // and CLEAR for a raw packet (the pixels follow verbatim).
+    // Truevision TGA File Format Specification v2.0, "Image Data".
+    let is_run = (packet_header >> 7) & 1
     let count = (packet_header & 0x7F) + 1 // 1..128 pixels
 
     if count > total_pixels - pixels_done {
       raise Failure::Failure("TGA: RLE packet exceeds image pixel count")
     }
 
-    if packet_type == 1 {
+    if is_run == 1 {
       // RLE packet: repeat the next pixel `count` times
       if pos + src_bpp > self.data.length() {
         raise Failure::Failure("TGA: truncated RLE pixel data")

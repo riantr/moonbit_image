@@ -194,17 +194,18 @@ fn ensure_bits(
   while xc < need {
     // Read up to 16 bits at once
     let to_read = if need - xc > 16 { 16 } else { need - xc }
-    try {
-      let (nr, val) = xr.read_bits(to_read)
-      xr = nr
-      xb = xb | (val << xc)
-      xc = xc + to_read
-    } catch {
-      _ =>
-        // End of bit stream (e.g., final block with padding).
-        // Return whatever we have; the caller will detect insufficient bits
-        // via clen > bc or similar checks.
-        break
+    // `read_bits_upto` never raises: when the stream runs out it
+    // returns the bits that were still there. That matters for the
+    // last symbol of the last block, which is often followed by fewer
+    // bits than the lookup table wants.
+    let (nr, val, got) = xr.read_bits_upto(to_read)
+    xr = nr
+    xb = xb | (val << xc)
+    xc = xc + got
+    if got < to_read {
+      // End of the bit stream (e.g. the padding after the final
+      // symbol). Whatever was read is already in the buffer.
+      break
     }
   }
   (xr, xb, xc)

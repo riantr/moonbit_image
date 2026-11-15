@@ -74,8 +74,10 @@ pub fn decode_tiff(data : Bytes) -> Image raise Failure {
         raise Failure::Failure("TIFF: greyscale needs SamplesPerPixel=1")
       }
     2 =>
-      if samples != 3 {
-        raise Failure::Failure("TIFF: RGB needs SamplesPerPixel=3")
+      if samples != 3 && samples != 4 {
+        raise Failure::Failure(
+          "TIFF: RGB needs SamplesPerPixel=3 (or 4 with an alpha channel)",
+        )
       }
     3 =>
       if samples != 1 {
@@ -117,13 +119,15 @@ pub fn decode_tiff(data : Bytes) -> Image raise Failure {
   }
 
   // Decode the strip into a PixelFormat image.
-  let fmt = match (photometric, bits) {
+  let fmt = match (photometric, bits, samples) {
     // Palette / greyscale → always expand to RGBA8 so consumers don't
     // have to reason about palette indices separately.
-    (3, _) => PixelFormat::RGBA8
-    (0, _) => PixelFormat::Gray8
-    (1, _) => PixelFormat::Gray8
-    (2, _) => PixelFormat::RGB8
+    (3, _, _) => PixelFormat::RGBA8
+    (0, _, _) => PixelFormat::Gray8
+    (1, _, _) => PixelFormat::Gray8
+    // RGB, with or without an alpha channel.
+    (2, _, 3) => PixelFormat::RGB8
+    (2, _, 4) => PixelFormat::RGBA8
     _ => abort("unreachable: photometric/bits validated above")
   }
   let img = decode_strip(
@@ -374,6 +378,8 @@ fn decode_strip(
       }
     // RGB 8-bit
     (2, 8, 3) => strip
+    // RGB 8-bit with an unassociated alpha channel
+    (2, 8, 4) => strip
     // RGB 16-bit → collapse to 8-bit
     (2, 16, 3) => shrink_rgb16_to_8(strip)
     // Palette: indices are 1/2/4/8-bit per pixel, looked up in

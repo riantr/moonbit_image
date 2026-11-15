@@ -262,42 +262,57 @@ fn idct_1d(
 }
 
 ///|
-/// 2-D IDCT on an 8x8 block, returns 64-element pixel array.
-/// Optimized: reuses 3 pre-allocated 8-element buffers instead of
+/// 2-D IDCT on an 8x8 block, returns a 64-element pixel array in the
+/// natural layout: `result[row * 8 + col]`.
+///
+/// The transform is separable. The row pass transforms every row of
+/// the block along the horizontal axis; the column pass then transforms
+/// every column along the vertical axis.
+///
+/// Both passes keep the natural layout, so the column pass gathers a
+/// column with a stride of 8 and scatters the result back with the
+/// same stride. Keeping the intermediate in a transposed layout would
+/// leave the finished block transposed as well - which is invisible on
+/// a uniform block and wrong on every other one.
+///
+/// Optimized: reuses 4 pre-allocated 8-element buffers instead of
 /// allocating 8 row + 8 tmp + 8 col = 24 temporary arrays per block.
 fn idct_2d(block : Array[Int32]) -> Array[Int32] {
-  // First pass: IDCT on rows, store in transposed layout. No level
-  // shift here — the row pass operates on the level-shifted DCT
-  // coefficients and produces a row of (still level-shifted) IDCT
-  // values, which the column pass then consumes. We also do NOT
-  // clamp the row pass output to [0, 255] because intermediate
-  // values legitimately fall outside that range and the column
-  // pass's cosine sums need the full magnitude to produce a
-  // correct final value.
+  // First pass: IDCT on rows. No level shift here — the row pass
+  // operates on the level-shifted DCT coefficients and produces a row
+  // of (still level-shifted) IDCT values, which the column pass then
+  // consumes. We also do NOT clamp the row pass output to [0, 255]
+  // because intermediate values legitimately fall outside that range
+  // and the column pass's cosine sums need the full magnitude to
+  // produce a correct final value.
   let t = Array::make(64, 0)
   // Reusable 8-element buffers (allocated once per block)
   let row_buf = Array::make(8, 0)
   let tmp_buf = Array::make(8, 0)
   let col_buf = Array::make(8, 0)
+  let col_out = Array::make(8, 0)
   for y = 0; y < 8; y = y + 1 {
     for x = 0; x < 8; x = x + 1 {
       row_buf[x] = block[y * 8 + x]
     }
     idct_1d(row_buf, tmp_buf, 0, false, false)
     for x = 0; x < 8; x = x + 1 {
-      t[x * 8 + y] = tmp_buf[x]
+      t[y * 8 + x] = tmp_buf[x]
     }
   }
-  // Second pass: IDCT on columns (rows of transposed matrix).
+  // Second pass: IDCT on columns.
   // Apply the +128 level shift here, exactly once, on the final
   // pass, AND clamp to [0, 255] — this is the pixel value the
   // downstream color conversion will read.
   let res = Array::make(64, 0)
   for x = 0; x < 8; x = x + 1 {
     for y = 0; y < 8; y = y + 1 {
-      col_buf[y] = t[x * 8 + y]
+      col_buf[y] = t[y * 8 + x]
     }
-    idct_1d(col_buf, res, x * 8, true, true)
+    idct_1d(col_buf, col_out, 0, true, true)
+    for y = 0; y < 8; y = y + 1 {
+      res[y * 8 + x] = col_out[y]
+    }
   }
   res
 }

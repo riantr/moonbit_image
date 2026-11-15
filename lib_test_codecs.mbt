@@ -379,8 +379,14 @@ test "codec matrix: every JPEG / PNG / GIF / TGA format is decodable" {
 // decode of the same files. The JPEG values are this decoder's own
 // deterministic output: the samples are 4:2:0 and this decoder upsamples
 // chroma nearest-neighbour, while libjpeg (hence Pillow) uses "fancy"
-// triangular upsampling, so chroma differs from Pillow by a few units.
-// Both are valid 4:2:0 decodes; the golden pins the behaviour we ship.
+// triangular upsampling, so chroma differs from Pillow by a few tens of
+// units while the luma agrees to within one or two. Both are valid
+// 4:2:0 decodes; the golden pins the behaviour we ship.
+//
+// These bytes also pin the block orientation. The IDCT used to leave
+// every 8x8 block transposed, which is invisible on a uniform block and
+// wrong on every other one; the golden was regenerated after that fix
+// and now fails loudly if the orientation changes again.
 // ---------------------------------------------------------------------------
 
 ///|
@@ -479,12 +485,14 @@ test "golden: jpeg pixels match this decoder's deterministic output" {
     decode_jpeg(fixture_jpeg_natural_64x64()) catch {
       _ => fail("decode_jpeg raised")
     },
-    [3, 0, 0, 5, 1, 0, 6, 6, 4, 9, 9, 7],
+    [
+      3, 0, 0, 3, 0, 0, 6, 0, 0, 8, 2, 2, 14, 2, 6, 16, 4, 8, 24, 2, 15, 25, 3, 16,
+    ],
   )
   assert_leading_bytes(
     decode_jpeg(fixture_jpeg_hq_64x64()) catch {
       _ => fail("decode_jpeg raised")
     },
-    [0, 0, 4, 1, 0, 5, 2, 0, 11, 3, 1, 12],
+    [0, 0, 4, 1, 0, 5, 2, 3, 5, 4, 5, 7, 5, 10, 6, 7, 12, 8, 6, 16, 5, 7, 17, 6],
   )
 }

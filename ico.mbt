@@ -107,7 +107,7 @@ pub fn decode_ico(data : Bytes) -> Image raise Failure {
     let data_offset = header_size + dib_size
     let file_size = header_size + inner.length()
     let synth = build_bmp_file_header(file_size, data_offset)
-    let full = concat_bytes(synth, inner)
+    let full = concat_bytes(synth, halve_dib_height(inner, dib_size))
     decode_bmp(full)
   } else {
     raise Failure::Failure("ICO: unrecognised inner image format")
@@ -149,6 +149,32 @@ fn build_bmp_file_header(file_size : Int32, data_offset : Int32) -> Bytes {
     o2.to_byte(),
     o3.to_byte(),
   ])
+}
+
+///|
+/// The height in the DIB header of an icon covers the XOR bitmap *and*
+/// the AND mask, so it is twice the height of the icon itself. The BMP
+/// decoder reads that field as the image height, so it has to be halved
+/// before the DIB is handed over.
+///
+/// BITMAPINFOHEADER stores biWidth at offset 4 and biHeight at offset
+/// 8; BITMAPCOREHEADER stores biWidth at offset 4 and biHeight at
+/// offset 6, both as 16-bit values.
+fn halve_dib_height(dib : Bytes, dib_size : Int32) -> Bytes raise Failure {
+  let arr = Array::make(dib.length(), b'\x00')
+  let mut i = 0
+  while i < dib.length() {
+    arr[i] = dib[i]
+    i = i + 1
+  }
+  if dib_size >= 40 {
+    let height = read_u32_le(dib, 8)
+    write_u32_le(arr, 8, height / 2)
+  } else {
+    let height = read_u16_le(dib, 6)
+    write_u16_le(arr, 6, height / 2)
+  }
+  Bytes::from_array(arr)
 }
 
 ///|
