@@ -423,9 +423,14 @@ fn PaletteCache::new() -> PaletteCache {
 
 ///|
 /// The index of the palette entry closest to a packed RGB value.
+///
+/// The search is a k-d tree over the palette, so it costs a handful of
+/// distance computations instead of one per palette entry.  That matters:
+/// a 256x256 image with a 256 entry palette would otherwise cost sixteen
+/// million distance computations.
 fn gif_palette_lookup(
   cache : PaletteCache,
-  palette : Array[Int32],
+  tree : KdTree,
   rgb : Int32,
 ) -> Int32 {
   let slot = gif_hash(rgb) & 4095
@@ -435,27 +440,224 @@ fn gif_palette_lookup(
   let r = gif_component(rgb, 0)
   let g = gif_component(rgb, 1)
   let b = gif_component(rgb, 2)
-  let mut best = 0
-  let mut best_dist = -1
+  let best = Array::make(2, 0)
+  best[0] = 0x7FFFFFFF
+  kd_search(tree, tree.root, r, g, b, best)
+  cache.key[slot] = rgb
+  cache.value[slot] = best[1]
+  best[1]
+}
+
+///|
+/// A k-d tree over the palette entries.
+///
+/// Every node holds one palette entry and splits the space on the axis with
+/// the largest spread.  The search visits the near side first and only
+/// crosses to the far side when the splitting plane is closer than the best
+/// match found so far, which is what makes it exact and fast.
+priv struct KdTree {
+  /// The palette index of the entry the node holds.
+  item : Array[Int32]
+  /// The axis the node splits on: 0 = red, 1 = green, 2 = blue.
+  axis : Array[Int32]
+  /// The value of the splitting plane on that axis.
+  split : Array[Int32]
+  /// The children, -1 when the node is a leaf.
+  left : Array[Int32]
+  right : Array[Int32]
+  /// The red, green and blue components of the entries.
+  pr : Array[Int32]
+  pg : Array[Int32]
+  pb : Array[Int32]
+  /// The root of the tree, -1 for an empty palette.
+  mut root : Int32
+}
+
+///|
+fn KdTree::new(palette : Array[Int32]) -> KdTree {
+  let n = palette.length()
+  let tree = {
+    item: Array::make(if n > 0 { n } else { 1 }, 0),
+    axis: Array::make(if n > 0 { n } else { 1 }, 0),
+    split: Array::make(if n > 0 { n } else { 1 }, 0),
+    left: Array::make(if n > 0 { n } else { 1 }, -1),
+    right: Array::make(if n > 0 { n } else { 1 }, -1),
+    pr: Array::make(if n > 0 { n } else { 1 }, 0),
+    pg: Array::make(if n > 0 { n } else { 1 }, 0),
+    pb: Array::make(if n > 0 { n } else { 1 }, 0),
+    root: -1,
+  }
+  let ids = Array::make(if n > 0 { n } else { 1 }, 0)
   let mut i = 0
-  while i < palette.length() {
+  while i < n {
     let p = palette[i]
-    let dr = r - gif_component(p, 0)
-    let dg = g - gif_component(p, 1)
-    let db = b - gif_component(p, 2)
-    let dist = dr * dr + dg * dg + db * db
-    if best_dist < 0 || dist < best_dist {
-      best_dist = dist
-      best = i
-      if dist == 0 {
-        break
-      }
-    }
+    tree.pr[i] = gif_component(p, 0)
+    tree.pg[i] = gif_component(p, 1)
+    tree.pb[i] = gif_component(p, 2)
+    ids[i] = i
     i = i + 1
   }
-  cache.key[slot] = rgb
-  cache.value[slot] = best
-  best
+  if n > 0 {
+    tree.root = kd_build(tree, ids, 0, n)
+  }
+  tree
+}
+
+///|
+/// Build the subtree over `ids[lo..hi)` and return its root.
+///
+/// The entries are sorted on the axis with the largest spread and split at
+/// the median, so the tree stays balanced.  The palette holds at most 256
+/// entries, so the insertion sort below is cheap.
+fn kd_build(tree : KdTree, ids : Array[Int32], lo : Int32, hi : Int32) -> Int32 {
+  if hi - lo <= 1 {
+    if lo >= hi {
+      return -1
+    }
+    // The slot of a node is the palette index of the entry it holds, so the
+    // two never collide.
+    let node = ids[lo]
+    tree.item[node] = node
+    tree.axis[node] = 0
+    tree.split[node] = 0
+    tree.left[node] = -1
+    tree.right[node] = -1
+    return node
+  }
+  // The axis with the largest spread.
+  let mut axis = 0
+  let mut spread = -1
+  let mut a = 0
+  while a < 3 {
+    let mut lo_v = 0x7FFFFFFF
+    let mut hi_v = -0x7FFFFFFF
+    let mut i = lo
+    while i < hi {
+      let id = ids[i]
+      let v = if a == 0 {
+        tree.pr[id]
+      } else if a == 1 {
+        tree.pg[id]
+      } else {
+        tree.pb[id]
+      }
+      if v < lo_v {
+        lo_v = v
+      }
+      if v > hi_v {
+        hi_v = v
+      }
+      i = i + 1
+    }
+    let s = hi_v - lo_v
+    if s > spread {
+      spread = s
+      axis = a
+    }
+    a = a + 1
+  }
+  // Sort the range on that axis.
+  let mut i = lo + 1
+  while i < hi {
+    let key = ids[i]
+    let kv = if axis == 0 {
+      tree.pr[key]
+    } else if axis == 1 {
+      tree.pg[key]
+    } else {
+      tree.pb[key]
+    }
+    let mut j = i - 1
+    while j >= lo {
+      let other = ids[j]
+      let ov = if axis == 0 {
+        tree.pr[other]
+      } else if axis == 1 {
+        tree.pg[other]
+      } else {
+        tree.pb[other]
+      }
+      if ov <= kv {
+        break
+      }
+      ids[j + 1] = other
+      j = j - 1
+    }
+    ids[j + 1] = key
+    i = i + 1
+  }
+  let mid = lo + (hi - lo) / 2
+  let node = ids[mid]
+  tree.item[node] = node
+  tree.axis[node] = axis
+  tree.split[node] = if axis == 0 {
+    tree.pr[node]
+  } else if axis == 1 {
+    tree.pg[node]
+  } else {
+    tree.pb[node]
+  }
+  // The median moves out of the range, so the two halves are the parts
+  // before and after it.
+  let right_ids = Array::make(hi - mid, 0)
+  let mut k = 0
+  let mut p = mid + 1
+  while p < hi {
+    right_ids[k] = ids[p]
+    k = k + 1
+    p = p + 1
+  }
+  tree.left[node] = kd_build(tree, ids, lo, mid)
+  tree.right[node] = kd_build(tree, right_ids, 0, hi - mid - 1)
+  node
+}
+
+///|
+/// Search the tree for the entry closest to (r, g, b).
+///
+/// `best` holds the squared distance of the best match in `best[0]` and its
+/// palette index in `best[1]`.
+fn kd_search(
+  tree : KdTree,
+  node : Int32,
+  r : Int32,
+  g : Int32,
+  b : Int32,
+  best : Array[Int32],
+) -> Unit {
+  if node < 0 {
+    return
+  }
+  let dr = r - tree.pr[node]
+  let dg = g - tree.pg[node]
+  let db = b - tree.pb[node]
+  let d = dr * dr + dg * dg + db * db
+  if d < best[0] {
+    best[0] = d
+    best[1] = node
+  }
+  if best[0] == 0 {
+    return
+  }
+  let axis = tree.axis[node]
+  let delta = if axis == 0 {
+    r - tree.split[node]
+  } else if axis == 1 {
+    g - tree.split[node]
+  } else {
+    b - tree.split[node]
+  }
+  if delta <= 0 {
+    kd_search(tree, tree.left[node], r, g, b, best)
+    if delta * delta <= best[0] {
+      kd_search(tree, tree.right[node], r, g, b, best)
+    }
+  } else {
+    kd_search(tree, tree.right[node], r, g, b, best)
+    if delta * delta <= best[0] {
+      kd_search(tree, tree.left[node], r, g, b, best)
+    }
+  }
 }
 
 //-----------------------------------------------------------------------------
@@ -565,6 +767,20 @@ fn LzwTable::put(
 }
 
 ///|
+/// Forget every entry.
+///
+/// The encoder resets the table with a clear code when the code space fills
+/// up.  The decoder resets its own table at that point, so the encoder has to
+/// forget its entries as well - otherwise it would keep handing out codes
+/// that the decoder reads as different strings, and the two would drift
+/// apart.
+fn LzwTable::clear(self : LzwTable) -> Unit {
+  for i = 0; i < self.used.length(); i = i + 1 {
+    self.used[i] = false
+  }
+}
+
+///|
 /// Compress a sequence of palette indices with GIF's LZW.
 ///
 /// The code width grows when the next free code no longer fits in the
@@ -609,8 +825,12 @@ fn gif_lzw_compress(
           code_size = code_size + 1
         }
       } else {
-        // The table is full: start over with a clear code.
+        // The table is full: start over with a clear code.  The table has to
+        // be emptied as well, because the decoder empties its own table at
+        // the clear code and would read the stale codes as different
+        // strings.
         writer.write_code(clear_code, code_size)
+        table.clear()
         next_code = eoi_code + 1
         code_size = min_code_size + 1
       }
@@ -698,6 +918,7 @@ pub fn encode_gif(image : Image) -> Bytes raise Failure {
 
   // Map every pixel to a palette index.
   let cache = PaletteCache::new()
+  let tree = KdTree::new(palette)
   let indices = Array::make(pixel_count, 0)
   let transparent_index = palette.length()
   i = 0
@@ -708,7 +929,7 @@ pub fn encode_gif(image : Image) -> Bytes raise Failure {
       let packed = (rgba.data[i * 4].to_int() << 16) |
         (rgba.data[i * 4 + 1].to_int() << 8) |
         rgba.data[i * 4 + 2].to_int()
-      indices[i] = gif_palette_lookup(cache, palette, packed)
+      indices[i] = gif_palette_lookup(cache, tree, packed)
     }
     i = i + 1
   }
