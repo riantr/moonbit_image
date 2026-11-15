@@ -18,3 +18,7 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+
+# Python bytecode from the scripts under .tools/
+__pycache__/
+*.pyc
