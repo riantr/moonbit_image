@@ -102,7 +102,7 @@ test "detect_format + ImageFormat::is_decodable covers every recognised format" 
     Some(f) => {
       assert_eq(image_format_name(f), "PNG")
       assert_true(f.is_decodable())
-      assert_false(f.is_encodable())
+      assert_true(f.is_encodable())
     }
     None => fail("PNG magic not detected")
   }
@@ -126,7 +126,7 @@ test "detect_format + ImageFormat::is_decodable covers every recognised format" 
     Some(f) => {
       assert_eq(image_format_name(f), "GIF")
       assert_true(f.is_decodable())
-      assert_false(f.is_encodable())
+      assert_true(f.is_encodable())
     }
     None => fail("GIF magic not detected")
   }
@@ -134,7 +134,7 @@ test "detect_format + ImageFormat::is_decodable covers every recognised format" 
     Some(f) => {
       assert_eq(image_format_name(f), "JPEG")
       assert_true(f.is_decodable())
-      assert_false(f.is_encodable())
+      assert_true(f.is_encodable())
     }
     None => fail("JPEG magic not detected")
   }

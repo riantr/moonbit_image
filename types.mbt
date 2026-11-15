@@ -64,7 +64,14 @@ pub fn ImageFormat::is_decodable(self : ImageFormat) -> Bool {
 /// Whether this format has an encoder (writes a fresh `Bytes`)
 pub fn ImageFormat::is_encodable(self : ImageFormat) -> Bool {
   match self {
-    ImageFormat::BMP | ImageFormat::QOI => true
+    ImageFormat::BMP
+    | ImageFormat::QOI
+    | ImageFormat::TGA
+    | ImageFormat::PNG
+    | ImageFormat::GIF
+    | ImageFormat::JPEG
+    | ImageFormat::ICO
+    | ImageFormat::TIFF => true
     _ => false
   }
 }

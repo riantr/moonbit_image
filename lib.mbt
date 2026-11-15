@@ -404,6 +404,36 @@ pub fn encode(img : Image, format : ImageFormat) -> Bytes raise DecodeError {
         Ok(bytes) => bytes
         Err(Failure::Failure(msg)) => raise DecodeError::InvalidHeader(msg)
       }
+    ImageFormat::TGA =>
+      match (Ok(encode_tga(img)) catch { e => Err(e) }) {
+        Ok(bytes) => bytes
+        Err(Failure::Failure(msg)) => raise DecodeError::InvalidHeader(msg)
+      }
+    ImageFormat::PNG =>
+      match (Ok(encode_png(img)) catch { e => Err(e) }) {
+        Ok(bytes) => bytes
+        Err(Failure::Failure(msg)) => raise DecodeError::InvalidHeader(msg)
+      }
+    ImageFormat::GIF =>
+      match (Ok(encode_gif(img)) catch { e => Err(e) }) {
+        Ok(bytes) => bytes
+        Err(Failure::Failure(msg)) => raise DecodeError::InvalidHeader(msg)
+      }
+    ImageFormat::JPEG =>
+      match (Ok(encode_jpeg(img, 85)) catch { e => Err(e) }) {
+        Ok(bytes) => bytes
+        Err(Failure::Failure(msg)) => raise DecodeError::InvalidHeader(msg)
+      }
+    ImageFormat::ICO =>
+      match (Ok(encode_ico(img)) catch { e => Err(e) }) {
+        Ok(bytes) => bytes
+        Err(Failure::Failure(msg)) => raise DecodeError::InvalidHeader(msg)
+      }
+    ImageFormat::TIFF =>
+      match (Ok(encode_tiff(img)) catch { e => Err(e) }) {
+        Ok(bytes) => bytes
+        Err(Failure::Failure(msg)) => raise DecodeError::InvalidHeader(msg)
+      }
     _ =>
       raise DecodeError::EncodeNotImplemented(
         "encoding not yet supported for " + image_format_name(format),
