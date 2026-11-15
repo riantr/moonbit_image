@@ -18,6 +18,18 @@
 //-----------------------------------------------------------------------------
 
 ///|
+/// A quantisation table of ones that still carries the AAN pre-scale factors
+/// of both frequency axes, so that even a file without a DQT segment decodes
+/// through the same butterfly.
+fn aan_identity_qt() -> Array[Double] {
+  let tbl = Array::make(64, 0.0)
+  for zi = 0; zi < 64; zi = zi + 1 {
+    tbl[zi] = aan_scale[zi % 8] * aan_scale[zi / 8]
+  }
+  tbl
+}
+
+///|
 /// Zigzag scan order (JPEG spec Figure K.2)
 let zigzag : Array[Int32] = [
   0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5, 12, 19, 26, 33, 40, 48,
@@ -27,17 +39,19 @@ let zigzag : Array[Int32] = [
 ]
 
 ///|
-/// IDCT basis coefficients (scaled by 2^12 = 4096)
-/// cos((2x+1)*u*pi/16) * 4096 for each (u, x)
-let dct_t : Array[Array[Int32]] = [
-  [1448, 1448, 1448, 1448, 1448, 1448, 1448, 1448],
-  [2009, 1703, 1138, 400, -400, -1138, -1703, -2009],
-  [1892, 784, -784, -1892, -1892, -784, 784, 1892],
-  [1703, -400, -2009, -1138, 1138, 2009, 400, -1703],
-  [1448, -1448, -1448, 1448, 1448, -1448, -1448, 1448],
-  [1138, -2009, 400, 1703, -1703, -400, 2009, -1138],
-  [784, -1892, 1892, -784, -784, 1892, -1892, 784],
-  [400, -1138, 1703, -2009, 2009, -1703, 1138, -400],
+/// AAN butterfly pre-scale factors, one per frequency index u = 0..7.
+///
+/// The AAN butterfly (the factorisation libjpeg uses in `jidctflt.c`) computes
+/// the inverse DCT up to a per-frequency diagonal.  Measured against the
+/// mathematical IDCT, that diagonal is `1 / (0.5 * C(u) * cos(u * pi / 16))`
+/// with `C(0) = 1/sqrt(2)` and `C(u) = 1` otherwise, so the factors below
+/// cancel it exactly.  They are folded into the quantisation table, which
+/// makes the correction free.
+let aan_scale : Array[Double] = [
+  0.353553390593273762200422181052424519642, 0.490392640201615224563091118067119518487,
+  0.461939766255643378064091862645248957797, 0.415734806151272617537059810530692891260,
+  0.353553390593273762200422181052424519642, 0.277785116509801112371415406974266437187,
+  0.191341716182544890035811268183837500734, 0.097545161008064117167815400718986120486,
 ]
 
 //-----------------------------------------------------------------------------
@@ -45,64 +59,88 @@ let dct_t : Array[Array[Int32]] = [
 //-----------------------------------------------------------------------------
 
 ///|
-/// JPEG bit reader. Uses byte_pos + bit_pos representation for efficient
-/// bulk reading.
+/// JPEG bit reader.
+///
+/// The bits are accumulated in `acc`, which holds the next `cnt` bits of the
+/// stream in its low bits, most significant bit first.  That makes a peek a
+/// shift and a mask, and it lets the Huffman decoder look at eight bits at
+/// once instead of one.
+///
 /// Fields are named differently from BitReader to avoid type ambiguity.
 priv struct JBR {
   buf : Bytes // entropy-coded data (with 0xFF00 stuffing already stripped)
-  bp : Int32 // current byte position
-  bitp : Int32 // next bit to read within byte (0=MSB, 7=LSB)
+  mut acc : Int32 // the bit buffer
+  mut cnt : Int32 // the number of valid bits in it
+  mut bp : Int32 // the next byte to load into it
 }
 
 ///|
 fn JBR::new(data : Bytes) -> JBR {
-  { buf: data, bp: 0, bitp: 0, }
+  { buf: data, acc: 0, cnt: 0, bp: 0, }
 }
 
 ///|
-/// Read n bits MSB-first. Returns (new_reader, value).
-/// Uses bulk byte reading when byte-aligned for efficiency.
-fn JBR::read_bits(self : JBR, n : Int32) -> (JBR, Int32) raise Failure {
+/// Make sure the buffer holds at least `n` bits.
+fn JBR::fill(self : JBR, n : Int32) -> Unit {
+  while self.cnt < n && self.bp < self.buf.length() {
+    self.acc = (self.acc << 8) | self.buf[self.bp].to_int()
+    self.cnt = self.cnt + 8
+    self.bp = self.bp + 1
+  }
+}
+
+///|
+/// Look at the next `n` bits without consuming them.  Bits past the end of
+/// the stream read as zero.
+fn JBR::peek(self : JBR, n : Int32) -> Int32 {
+  if n <= 0 {
+    return 0
+  }
+  self.fill(n)
+  if self.cnt < n {
+    return (self.acc << (n - self.cnt)) & ((1 << n) - 1)
+  }
+  (self.acc >> (self.cnt - n)) & ((1 << n) - 1)
+}
+
+///|
+/// Drop the next `n` bits.
+///
+/// The consumed bits are cut off the accumulator, so that it only ever holds
+/// the bits that are still to be read.
+fn JBR::skip(self : JBR, n : Int32) -> Unit {
+  self.cnt = self.cnt - n
+  if self.cnt <= 0 {
+    self.cnt = 0
+    self.acc = 0
+  } else {
+    self.acc = self.acc & ((1 << self.cnt) - 1)
+  }
+}
+
+///|
+/// Read n bits MSB-first.
+fn JBR::read_bits(self : JBR, n : Int32) -> Int32 raise Failure {
   if n == 0 {
-    return (self, 0)
+    return 0
   }
-
-  let mut bp_idx = self.bp
-  let mut bit_pos = self.bitp
-  let mut result = 0
-  let mut needed = n
-
-  // Fast path: byte-aligned, reading 8+ bits → read whole bytes
-  while needed >= 8 && bit_pos == 0 {
-    if bp_idx >= self.buf.length() {
-      raise Failure::Failure("JPEG: unexpected end of entropy data")
-    }
-    result = (result << 8) | self.buf[bp_idx].to_int()
-    bp_idx = bp_idx + 1
-    needed = needed - 8
+  self.fill(n)
+  if self.cnt < n {
+    raise Failure::Failure("JPEG: unexpected end of entropy data")
   }
+  let v = (self.acc >> (self.cnt - n)) & ((1 << n) - 1)
+  self.skip(n)
+  v
+}
 
-  // Remaining bits (either not byte-aligned, or < 8 bits left)
-  while needed > 0 {
-    if bp_idx >= self.buf.length() {
-      raise Failure::Failure("JPEG: unexpected end of entropy data")
-    }
-    let byte = self.buf[bp_idx].to_int()
-    let bits_left = 8 - bit_pos
-    let take = if needed < bits_left { needed } else { bits_left }
-    // Extract bits from the current position within the byte (MSB-first)
-    let val = (byte >> (bits_left - take)) & ((1 << take) - 1)
-    result = (result << take) | val
-    needed = needed - take
-    if take == bits_left {
-      bp_idx = bp_idx + 1
-      bit_pos = 0
-    } else {
-      bit_pos = bit_pos + take
-    }
-  }
-
-  ({ buf: self.buf, bp: bp_idx, bitp: bit_pos, }, result)
+///|
+/// Throw the buffered bits away and restart at the next byte.
+///
+/// The restart marker of a JPEG scan is byte aligned, so the bits that were
+/// read ahead of it have to go.
+fn JBR::align(self : JBR) -> Unit {
+  self.acc = 0
+  self.cnt = 0
 }
 
 //-----------------------------------------------------------------------------
@@ -123,6 +161,10 @@ priv struct JHTEntry {
 priv struct JHT {
   table : Array[JHTEntry]
   tbl_bits : Int32
+  /// The codes of at most `fast_bits` bits, indexed by the next bits of the
+  /// stream.  This is the table the decoder uses.
+  fast : Array[JHTEntry]
+  fast_bits : Int32
 }
 
 ///|
@@ -139,7 +181,7 @@ fn build_jht(bits : Array[Int32], hv_in : Array[Int32]) -> JHT {
   if max_len == 0 {
     // Return empty table with sentinel
     let tbl = Array::make(1, { sym: -1, len: 0, })
-    return { table: tbl, tbl_bits: 0, }
+    return { table: tbl, tbl_bits: 0, fast: tbl, fast_bits: 0, }
   }
 
   // Compute canonical Huffman codes for each length (MSB-first like JPEG)
@@ -164,6 +206,11 @@ fn build_jht(bits : Array[Int32], hv_in : Array[Int32]) -> JHT {
   let sentinel = { sym: -1, len: 0, }
   let tbl = Array::make(ts, sentinel)
 
+  // Build a fast table of the codes that are at most eight bits long.  It is
+  // indexed by the next eight bits of the stream, so a lookup gives the
+  // symbol and its length in one step.
+  let fast_bits = if max_len < 8 { max_len } else { 8 }
+  let fast = Array::make(1 << fast_bits, { sym: -1, len: 0, })
   let mut si = 0
   for l = 1; l <= max_len; l = l + 1 {
     let count = bits[l - 1]
@@ -173,148 +220,184 @@ fn build_jht(bits : Array[Int32], hv_in : Array[Int32]) -> JHT {
         let c = codes[i]
         let sym_val = hv_in[si]
         si = si + 1
-        // Fill all table entries starting with this prefix
         let entry = { sym: sym_val, len: l, }
-        let base = c << (tbl_bits - l)
-        let step = 1 << (tbl_bits - l)
-        for j = 0; j < step && base + j < ts; j = j + 1 {
-          tbl[base + j] = entry
+        // Fill every entry of the prefix table that starts with this code.
+        let pbase = c << (tbl_bits - l)
+        let pstep = 1 << (tbl_bits - l)
+        let mut j = 0
+        while j < pstep {
+          tbl[pbase + j] = entry
+          j = j + 1
+        }
+        if l <= fast_bits {
+          // And every entry of the fast table that starts with this code.
+          let base = c << (fast_bits - l)
+          let step = 1 << (fast_bits - l)
+          let mut k = 0
+          while k < step {
+            fast[base + k] = entry
+            k = k + 1
+          }
         }
       }
     }
   }
 
-  { table: tbl, tbl_bits, }
+  { table: tbl, tbl_bits, fast, fast_bits, }
+}
+
+///|
+/// Decode a symbol using the fast lookup table.
+///
+/// The next eight bits of the stream index a table that holds the symbol
+/// and the length of its code.  A code that is longer than eight bits is
+/// rare, and it is decoded by the slow path below.
+fn jht_decode(ht : JHT, r : JBR) -> Int32 raise Failure {
+  let bits = r.peek(ht.fast_bits)
+  let e = ht.fast[bits]
+  if e.len > 0 {
+    r.skip(e.len)
+    return e.sym
+  }
+  // The slow path: a code of more than eight bits.  Walk the prefix table
+  // one bit at a time.
+  let mut code = 0
+  for l = 1; l <= ht.tbl_bits; l = l + 1 {
+    code = (code << 1) | r.peek(1)
+    r.skip(1)
+    let idx = code << (ht.tbl_bits - l)
+    let ent = ht.table[idx]
+    if ent.len == l {
+      return ent.sym
+    }
+  }
+  raise Failure::Failure("JPEG: bad Huffman code")
 }
 
 ///|
 /// Decode a symbol using the prefix lookup table.
 /// Reads one bit at a time (avoiding push-back complexity), but uses the
 /// prefix table for O(1) validation at each bit length.
-fn jht_decode(ht : JHT, r : JBR) -> (JBR, Int32) raise Failure {
-  let mut reader = r
-  let mut code = 0
-  for l = 1; l <= 16; l = l + 1 {
-    let (nr, bit) = reader.read_bits(1)
-    reader = nr
-    code = (code << 1) | bit
-    // Check if this prefix matches a code of length l in the table
-    if l <= ht.tbl_bits {
-      let idx = code << (ht.tbl_bits - l)
-      let e = ht.table[idx]
-      if e.len == l {
-        return (reader, e.sym)
-      }
-    }
-  }
-  raise Failure::Failure("JPEG: bad Huffman code")
-}
+/// The legacy one-bit-at-a-time decoder is kept out of the hot path: the
+/// fast table above handles every code of up to eight bits.
 
 //-----------------------------------------------------------------------------
 // IDCT (Inverse Discrete Cosine Transform)
 //-----------------------------------------------------------------------------
 
 ///|
-/// 1-D IDCT on 8-element array v, writing result to out[os..os+7].
-/// Uses pre-computed module-level dct_t coefficient matrix.
+/// 1-D AAN butterfly inverse DCT on 8 samples.
 ///
-/// `apply_level_shift` and `is_final` together control two things:
-///   * The +128 JPEG DC level shift is applied exactly ONCE, on the
-///     final (column) pass — never on the row pass. Applying it
-///     twice would shift the result by 256, clamping almost every
-///     pixel to white.
-///   * Clamping to [0, 255] only happens on the final pass. The
-///     intermediate row pass produces values in the level-shifted
-///     range ([-128, 127] for typical 8-bit YCbCr input) and must
-///     NOT be clamped, otherwise the next 1-D pass's cosine sums
-///     saturate and we get the classic "花屏" 8×8 block pattern.
-fn idct_1d(
-  v : Array[Int32],
-  out : Array[Int32],
+/// `v` holds the eight inputs with a stride of `vs`; the eight results are
+/// written to `out` with a stride of `os`.  A stride of 1 is the contiguous
+/// case, a stride of 8 the strided one that the column pass needs.
+///
+/// The butterfly is the factorisation of the inverse DCT matrix that libjpeg
+/// uses in `jidctflt.c`: about a dozen multiplications and a few dozen
+/// additions, against the 64 multiply-accumulates of the direct matrix
+/// product.  It computes the transform up to the per-frequency diagonal that
+/// `aan_scale` cancels.
+///
+/// The eight inputs are read into locals before the first store, so `out` may
+/// be the same array as `v`.
+fn aan_idct_1d(
+  v : Array[Double],
+  vs : Int32,
+  out : Array[Double],
   os : Int32,
-  apply_level_shift : Bool,
-  is_final : Bool,
 ) -> Unit {
-  for x = 0; x < 8; x = x + 1 {
-    let mut sum = 0
-    for u = 0; u < 8; u = u + 1 {
-      sum = sum + v[u] * dct_t[u][x]
-    }
-    let pixel = if apply_level_shift {
-      ((sum + 2048) >> 12) + 128
-    } else {
-      sum >> 12
-    }
-    if is_final {
-      if pixel < 0 {
-        out[os + x] = 0
-      } else if pixel > 255 {
-        out[os + x] = 255
-      } else {
-        out[os + x] = pixel
-      }
-    } else {
-      // Intermediate pass: store the raw value (can be outside [0, 255])
-      // so the next 1-D pass sees the full magnitude.
-      out[os + x] = pixel
-    }
-  }
+  let v0 = v[vs * 0]
+  let v1 = v[vs * 1]
+  let v2 = v[vs * 2]
+  let v3 = v[vs * 3]
+  let v4 = v[vs * 4]
+  let v5 = v[vs * 5]
+  let v6 = v[vs * 6]
+  let v7 = v[vs * 7]
+  // Even part: the coefficients of the even frequencies.
+  let t10 = v0 + v4
+  let t11 = v0 - v4
+  let t13 = v2 + v6
+  let t12 = (v2 - v6) * 1.4142135623730951 - t13
+  let e0 = t10 + t13
+  let e3 = t10 - t13
+  let e1 = t11 + t12
+  let e2 = t11 - t12
+  // Odd part: the coefficients of the odd frequencies.
+  let z13 = v5 + v3
+  let z10 = v5 - v3
+  let z11 = v1 + v7
+  let z12 = v1 - v7
+  let o7 = z11 + z13
+  let o11 = (z11 - z13) * 1.4142135623730951
+  let z5 = (z10 + z12) * 1.8477590650225735
+  let o10 = z12 * 1.0823922002923940 - z5
+  let o12 = z10 * -2.6131259297527531 + z5
+  let o6 = o12 - o7
+  let o5 = o11 - o6
+  let o4 = o10 + o5
+  out[os + 0] = e0 + o7
+  out[os + 7] = e0 - o7
+  out[os + 1] = e1 + o6
+  out[os + 6] = e1 - o6
+  out[os + 2] = e2 + o5
+  out[os + 5] = e2 - o5
+  out[os + 4] = e3 + o4
+  out[os + 3] = e3 - o4
 }
 
 ///|
-/// 2-D IDCT on an 8x8 block, returns a 64-element pixel array in the
-/// natural layout: `result[row * 8 + col]`.
+/// 2-D IDCT on an 8x8 block.
 ///
-/// The transform is separable. The row pass transforms every row of
-/// the block along the horizontal axis; the column pass then transforms
-/// every column along the vertical axis.
+/// `coeffs` holds the dequantised coefficients in the natural layout
+/// (`row * 8 + col`), `qt` the matching quantisation table - which already
+/// carries the `aan_scale` factors, so the butterfly's diagonal cancels
+/// itself.  The result is written to `pixels` in the same layout, with the
+/// +128 level shift applied and the values clamped to [0, 255].
 ///
-/// Both passes keep the natural layout, so the column pass gathers a
-/// column with a stride of 8 and scatters the result back with the
-/// same stride. Keeping the intermediate in a transposed layout would
-/// leave the finished block transposed as well - which is invisible on
-/// a uniform block and wrong on every other one.
+/// The transform is separable: the first pass transforms every row along the
+/// horizontal axis, the second pass every column along the vertical axis.
+/// Both passes keep the natural layout.
 ///
-/// Optimized: reuses 4 pre-allocated 8-element buffers instead of
-/// allocating 8 row + 8 tmp + 8 col = 24 temporary arrays per block.
-fn idct_2d(block : Array[Int32]) -> Array[Int32] {
-  // First pass: IDCT on rows. No level shift here — the row pass
-  // operates on the level-shifted DCT coefficients and produces a row
-  // of (still level-shifted) IDCT values, which the column pass then
-  // consumes. We also do NOT clamp the row pass output to [0, 255]
-  // because intermediate values legitimately fall outside that range
-  // and the column pass's cosine sums need the full magnitude to
-  // produce a correct final value.
-  let t = Array::make(64, 0)
-  // Reusable 8-element buffers (allocated once per block)
-  let row_buf = Array::make(8, 0)
-  let tmp_buf = Array::make(8, 0)
-  let col_buf = Array::make(8, 0)
-  let col_out = Array::make(8, 0)
+/// Every buffer is supplied by the caller, so decoding a block allocates
+/// nothing.  The intermediate values of the first pass are neither level
+/// shifted nor clamped: they legitimately leave the [0, 255] range, and
+/// clamping them there would saturate the second pass and produce the
+/// classic "花屏" 8x8 block pattern.
+fn idct_2d(
+  coeffs : Array[Int32],
+  qt : Array[Double],
+  row_buf : Array[Double],
+  work : Array[Double],
+  col_buf : Array[Double],
+  pixels : Array[Int32],
+) -> Unit {
+  // First pass: the rows, along the horizontal axis.
   for y = 0; y < 8; y = y + 1 {
+    let base = y * 8
     for x = 0; x < 8; x = x + 1 {
-      row_buf[x] = block[y * 8 + x]
+      row_buf[x] = coeffs[base + x].to_double() * qt[base + x]
     }
-    idct_1d(row_buf, tmp_buf, 0, false, false)
-    for x = 0; x < 8; x = x + 1 {
-      t[y * 8 + x] = tmp_buf[x]
-    }
+    aan_idct_1d(row_buf, 1, work, base)
   }
-  // Second pass: IDCT on columns.
-  // Apply the +128 level shift here, exactly once, on the final
-  // pass, AND clamp to [0, 255] — this is the pixel value the
-  // downstream color conversion will read.
-  let res = Array::make(64, 0)
+  // Second pass: the columns, along the vertical axis.  This is the final
+  // pass, so the +128 level shift and the clamp happen here, exactly once.
   for x = 0; x < 8; x = x + 1 {
     for y = 0; y < 8; y = y + 1 {
-      col_buf[y] = t[y * 8 + x]
+      col_buf[y] = work[y * 8 + x]
     }
-    idct_1d(col_buf, col_out, 0, true, true)
+    aan_idct_1d(col_buf, 1, col_buf, 0)
     for y = 0; y < 8; y = y + 1 {
-      res[y * 8 + x] = col_out[y]
+      let v = (col_buf[y] + 0.5).floor().to_int() + 128
+      if v < 0 {
+        pixels[y * 8 + x] = 0
+      } else if v > 255 {
+        pixels[y * 8 + x] = 255
+      } else {
+        pixels[y * 8 + x] = v
+      }
     }
   }
-  res
 }
 
 //-----------------------------------------------------------------------------
@@ -322,31 +405,28 @@ fn idct_2d(block : Array[Int32]) -> Array[Int32] {
 //-----------------------------------------------------------------------------
 
 ///|
-/// Decode DC coefficient. Returns (reader, new_value, new_pred).
-fn jpg_dc(r : JBR, ht : JHT, pred : Int32) -> (JBR, Int32, Int32) raise Failure {
-  let (r2, cat) = jht_decode(ht, r)
+/// Decode DC coefficient. Returns the new value and the new predictor.
+fn jpg_dc(r : JBR, ht : JHT, pred : Int32) -> (Int32, Int32) raise Failure {
+  let cat = jht_decode(ht, r)
   if cat == 0 {
-    return (r2, pred, pred)
+    return (pred, pred)
   }
-  let (r3, bits) = r2.read_bits(cat)
+  let bits = r.read_bits(cat)
   let half = 1 << (cat - 1)
   let diff = if bits < half { bits - ((1 << cat) - 1) } else { bits }
   let new_val = pred + diff
-  (r3, new_val, new_val)
+  (new_val, new_val)
 }
 
 ///|
 /// Decode AC coefficients for one 8x8 block.
 /// Writes decoded values to block[] at zigzag positions.
-/// Returns the updated reader.
-fn jpg_ac(r : JBR, ht : JHT, block : Array[Int32]) -> JBR raise Failure {
-  let mut reader = r
+fn jpg_ac(r : JBR, ht : JHT, block : Array[Int32]) -> Unit raise Failure {
   let mut k = 1
   while k < 64 {
-    let (r2, sym) = jht_decode(ht, reader)
-    reader = r2
+    let sym = jht_decode(ht, r)
     if sym == 0 {
-      return reader
+      return
     } // EOB
     let rs = sym >> 4
     let sz = sym & 0xF
@@ -360,8 +440,7 @@ fn jpg_ac(r : JBR, ht : JHT, block : Array[Int32]) -> JBR raise Failure {
       break
     }
     if sz > 0 {
-      let (r3, bits) = reader.read_bits(sz)
-      reader = r3
+      let bits = r.read_bits(sz)
       let half = 1 << (sz - 1)
       let val = if bits < half { bits - ((1 << sz) - 1) } else { bits }
       let zi = zigzag[k]
@@ -371,27 +450,35 @@ fn jpg_ac(r : JBR, ht : JHT, block : Array[Int32]) -> JBR raise Failure {
     }
     k = k + 1
   }
-  reader
 }
 
 ///|
-/// Decode one 8x8 block. Returns (reader, new_dc_pred, pixel_array[64]).
+/// Decode one 8x8 block. Returns (reader, new_dc_pred).
+///
+/// The coefficients are read into `coeffs`, the dequantised pixels are written
+/// to `pixels`.  Both buffers belong to the caller, so a decoded block costs
+/// no allocation.
 fn jpg_block(
   r : JBR,
   dc_ht : JHT,
   ac_ht : JHT,
-  qt : Array[Int32],
+  qt : Array[Double],
   dc_pred : Int32,
-) -> (JBR, Int32, Array[Int32]) raise Failure {
-  let block = Array::make(64, 0)
-  let (r2, _dc_val, ndc) = jpg_dc(r, dc_ht, dc_pred)
-  let r3 = jpg_ac(r2, ac_ht, block)
-  block[0] = ndc
-  // Dequantize
+  coeffs : Array[Int32],
+  pixels : Array[Int32],
+  row_buf : Array[Double],
+  work : Array[Double],
+  col_buf : Array[Double],
+) -> Int32 raise Failure {
+  // The coefficients of a block are sparse, so the buffer has to start empty.
   for i = 0; i < 64; i = i + 1 {
-    block[i] = block[i] * qt[i]
+    coeffs[i] = 0
   }
-  (r3, ndc, idct_2d(block))
+  let (ndc, _new_pred) = jpg_dc(r, dc_ht, dc_pred)
+  jpg_ac(r, ac_ht, coeffs)
+  coeffs[0] = ndc
+  idct_2d(coeffs, qt, row_buf, work, col_buf, pixels)
+  ndc
 }
 
 //-----------------------------------------------------------------------------
@@ -442,13 +529,16 @@ pub fn decode_jpeg(data : Bytes) -> Image raise Failure {
   let mut comp_v = Array::make(0, 0) // vertical sampling factor
   let mut comp_qt = Array::make(0, 0) // quantization table selector
 
-  // Quantization tables (up to 4)
-  let qt = Array::make(4, Array::make(64, 1))
+  // Quantization tables (up to 4).  Each entry already carries the AAN
+  // pre-scale factors of its two frequency axes.
+  let qt = Array::make(4, aan_identity_qt())
 
   // Huffman tables: [TC][TH] where TC=0:DC, TC=1:AC
   let ht_sentinel = JHT::{
     table: Array::make(1, { sym: -1, len: 0, }),
     tbl_bits: 0,
+    fast: Array::make(1, { sym: -1, len: 0, }),
+    fast_bits: 0,
   }
   let dc_ht = Array::make(4, ht_sentinel)
   let ac_ht = Array::make(4, ht_sentinel)
@@ -489,15 +579,24 @@ pub fn decode_jpeg(data : Bytes) -> Image raise Failure {
         pos = pos + 1
         let tid = info & 0x0F
         let prec = (info >> 4) & 0x0F
-        let tbl = Array::make(64, 0)
+        let tbl = Array::make(64, 0.0)
         for i = 0; i < 64; i = i + 1 {
-          if prec == 0 {
-            tbl[zigzag[i]] = data[pos].to_int()
+          let q = if prec == 0 {
+            let v = data[pos].to_int()
             pos = pos + 1
+            v
           } else {
-            tbl[zigzag[i]] = (data[pos].to_int() << 8) | data[pos + 1].to_int()
+            let v = (data[pos].to_int() << 8) | data[pos + 1].to_int()
             pos = pos + 2
+            v
           }
+          // The table is stored in zigzag order; `zi` is the natural index of
+          // the coefficient, so `zi % 8` is its horizontal frequency and
+          // `zi / 8` its vertical one.  The AAN pre-scale factors of the two
+          // axes are folded in here, which makes the butterfly's diagonal
+          // cancel itself at no cost.
+          let zi = zigzag[i]
+          tbl[zi] = q.to_double() * aan_scale[zi % 8] * aan_scale[zi / 8]
         }
         if tid < 4 {
           qt[tid] = tbl
@@ -649,10 +748,18 @@ pub fn decode_jpeg(data : Bytes) -> Image raise Failure {
       // Per-component DC predictors
       let dc_pred = Array::make(nc, 0)
 
-      let mut reader = JBR::new(ec)
+      let reader = JBR::new(ec)
       let mcus_x = (w + mcu_w - 1) / mcu_w
       let mcus_y = (h + mcu_h - 1) / mcu_h
       let mut block_counter = 0
+
+      // The buffers of the block decoder.  They live here, outside the loop
+      // over the blocks, so that decoding a block allocates nothing.
+      let blk_coeffs = Array::make(64, 0)
+      let blk_pixels = Array::make(64, 0)
+      let blk_row = Array::make(8, 0.0)
+      let blk_work = Array::make(64, 0.0)
+      let blk_col = Array::make(8, 0.0)
 
       for my = 0; my < mcus_y; my = my + 1 {
         for mx = 0; mx < mcus_x; mx = mx + 1 {
@@ -668,15 +775,20 @@ pub fn decode_jpeg(data : Bytes) -> Image raise Failure {
             // Decode sf_h * sf_v data units for this component in this MCU
             for vy = 0; vy < sf_v; vy = vy + 1 {
               for vx = 0; vx < sf_h; vx = vx + 1 {
-                let (r2, ndc, pixels) = jpg_block(
+                let ndc = jpg_block(
                   reader,
                   dc_ht[dht_dc],
                   ac_ht[dht_ac],
                   qt[qti],
                   dc_pred[ci],
+                  blk_coeffs,
+                  blk_pixels,
+                  blk_row,
+                  blk_work,
+                  blk_col,
                 )
-                reader = r2
                 dc_pred[ci] = ndc
+                let pixels = blk_pixels
 
                 // Place decoded block into the component plane.
                 // `mx`/`my` are MCU indices in the *macro* grid (grid step
@@ -711,7 +823,9 @@ pub fn decode_jpeg(data : Bytes) -> Image raise Failure {
                   for i = 0; i < nc; i = i + 1 {
                     dc_pred[i] = 0
                   }
-                  reader = { buf: reader.buf, bp: reader.bp, bitp: 0, }
+                  // The restart marker is byte aligned, so the bits that
+                  // were read ahead of it have to go.
+                  reader.align()
                 }
               }
             }

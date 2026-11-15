@@ -126,42 +126,25 @@ fn jpeg_ac_chroma_values() -> Array[Int32] {
 }
 
 ///|
-/// The cosine table of the 8-point DCT: `cos_table[u][x]` is
-/// `cos((2x + 1) * u * pi / 16)`.
-fn jpeg_cos_table() -> Array[Array[Double]] {
+/// The cosine table of the 8-point DCT, flattened into one array:
+/// `cos_flat[u * 8 + x]` is `cos((2x + 1) * u * pi / 16)`.
+///
+/// The table is flat because the inner loop of the transform reads it once
+/// per multiply-accumulate, and a flat array needs one index instead of
+/// two.
+fn jpeg_cos_table() -> Array[Double] {
   [
-    [
-      1.0000000000, 1.0000000000, 1.0000000000, 1.0000000000, 1.0000000000, 1.0000000000,
-      1.0000000000, 1.0000000000,
-    ],
-    [
-      0.9807852804, 0.8314696123, 0.5555702330, 0.1950903220, -0.1950903220, -0.5555702330,
-      -0.8314696123, -0.9807852804,
-    ],
-    [
-      0.9238795325, 0.3826834324, -0.3826834324, -0.9238795325, -0.9238795325, -0.3826834324,
-      0.3826834324, 0.9238795325,
-    ],
-    [
-      0.8314696123, -0.1950903220, -0.9807852804, -0.5555702330, 0.5555702330, 0.9807852804,
-      0.1950903220, -0.8314696123,
-    ],
-    [
-      0.7071067812, -0.7071067812, -0.7071067812, 0.7071067812, 0.7071067812, -0.7071067812,
-      -0.7071067812, 0.7071067812,
-    ],
-    [
-      0.5555702330, -0.9807852804, 0.1950903220, 0.8314696123, -0.8314696123, -0.1950903220,
-      0.9807852804, -0.5555702330,
-    ],
-    [
-      0.3826834324, -0.9238795325, 0.9238795325, -0.3826834324, -0.3826834324, 0.9238795325,
-      -0.9238795325, 0.3826834324,
-    ],
-    [
-      0.1950903220, -0.5555702330, 0.8314696123, -0.9807852804, 0.9807852804, -0.8314696123,
-      0.5555702330, -0.1950903220,
-    ],
+    1.0000000000, 1.0000000000, 1.0000000000, 1.0000000000, 1.0000000000, 1.0000000000,
+    1.0000000000, 1.0000000000, 0.9807852804, 0.8314696123, 0.5555702330, 0.1950903220,
+    -0.1950903220, -0.5555702330, -0.8314696123, -0.9807852804, 0.9238795325, 0.3826834324,
+    -0.3826834324, -0.9238795325, -0.9238795325, -0.3826834324, 0.3826834324, 0.9238795325,
+    0.8314696123, -0.1950903220, -0.9807852804, -0.5555702330, 0.5555702330, 0.9807852804,
+    0.1950903220, -0.8314696123, 0.7071067812, -0.7071067812, -0.7071067812, 0.7071067812,
+    0.7071067812, -0.7071067812, -0.7071067812, 0.7071067812, 0.5555702330, -0.9807852804,
+    0.1950903220, 0.8314696123, -0.8314696123, -0.1950903220, 0.9807852804, -0.5555702330,
+    0.3826834324, -0.9238795325, 0.9238795325, -0.3826834324, -0.3826834324, 0.9238795325,
+    -0.9238795325, 0.3826834324, 0.1950903220, -0.5555702330, 0.8314696123, -0.9807852804,
+    0.9807852804, -0.8314696123, 0.5555702330, -0.1950903220,
   ]
 }
 
@@ -278,26 +261,34 @@ fn JpegBitWriter::flush(self : JpegBitWriter) -> Unit {
 /// The 8-point forward DCT of one block of 64 samples, in natural
 /// order. The result is the 64 frequency coefficients in natural
 /// (row-major) order.
+///
+/// `tmp` and `out` are scratch buffers of 64 elements that belong to the
+/// caller, so that encoding a block allocates nothing.
+///
+/// The transform is separable: the first pass transforms the columns and
+/// the second one the rows.
 fn jpeg_fdct(
   samples : Array[Double],
-  cos_table : Array[Array[Double]],
-) -> Array[Double] {
-  let tmp = Array::make(64, 0.0)
-  let out = Array::make(64, 0.0)
+  cos_table : Array[Double],
+  tmp : Array[Double],
+  out : Array[Double],
+) -> Unit {
   let inv_sqrt2 = 0.7071067812
   // Column pass: tmp[u * 8 + y].
   let mut y = 0
   while y < 8 {
+    let row = y * 8
     let mut u = 0
     while u < 8 {
+      let base = u * 8
       let mut sum = 0.0
       let mut x = 0
       while x < 8 {
-        sum = sum + samples[y * 8 + x] * cos_table[u][x]
+        sum = sum + samples[row + x] * cos_table[base + x]
         x = x + 1
       }
       let scaled = if u == 0 { sum * inv_sqrt2 } else { sum }
-      tmp[u * 8 + y] = scaled
+      tmp[base + y] = scaled
       u = u + 1
     }
     y = y + 1
@@ -305,12 +296,14 @@ fn jpeg_fdct(
   // Row pass: out[v * 8 + u].
   let mut u = 0
   while u < 8 {
+    let col = u * 8
     let mut v = 0
     while v < 8 {
+      let base = v * 8
       let mut sum = 0.0
       let mut y = 0
       while y < 8 {
-        sum = sum + tmp[u * 8 + y] * cos_table[v][y]
+        sum = sum + tmp[col + y] * cos_table[base + y]
         y = y + 1
       }
       let scaled = if v == 0 { sum * inv_sqrt2 } else { sum }
@@ -319,7 +312,6 @@ fn jpeg_fdct(
     }
     u = u + 1
   }
-  out
 }
 
 ///|
@@ -365,20 +357,22 @@ fn jpeg_scale_quant(base : Array[Int32], quality : Int32) -> Array[Int32] {
 fn jpeg_encode_block(
   writer : JpegBitWriter,
   samples : Array[Double],
-  cos_table : Array[Array[Double]],
+  cos_table : Array[Double],
   quant : Array[Int32],
   zigzag : Array[Int32],
   dc_table : HuffTable,
   ac_table : HuffTable,
   prev_dc : Int32,
+  fdct_tmp : Array[Double],
+  fdct_out : Array[Double],
+  quantised : Array[Int32],
 ) -> Int32 {
-  let coefficients = jpeg_fdct(samples, cos_table)
+  jpeg_fdct(samples, cos_table, fdct_tmp, fdct_out)
   // Quantise into the zigzagged order.
-  let quantised = Array::make(64, 0)
   let mut i = 0
   while i < 64 {
     let natural = zigzag[i]
-    let value = coefficients[natural] / quant[natural].to_double()
+    let value = fdct_out[natural] / quant[natural].to_double()
     let rounded = if value < 0.0 {
       -(-value + 0.5).floor().to_int()
     } else {
@@ -601,6 +595,11 @@ pub fn encode_jpeg(image : Image, quality : Int32) -> Bytes raise Failure {
   let blocks_x = (width + 7) / 8
   let blocks_y = (height + 7) / 8
   let block = Array::make(64, 0.0)
+  // The scratch buffers of the block encoder, so that encoding a block
+  // allocates nothing.
+  let fdct_tmp = Array::make(64, 0.0)
+  let fdct_out = Array::make(64, 0.0)
+  let quantised = Array::make(64, 0)
   let mut prev_dc_y = 0
   let mut prev_dc_cb = 0
   let mut prev_dc_cr = 0
@@ -640,7 +639,8 @@ pub fn encode_jpeg(image : Image, quality : Int32) -> Bytes raise Failure {
           prev_dc_cr
         }
         let dc = jpeg_encode_block(
-          writer, block, cos_table, quant, zigzag, dc_table, ac_table, prev,
+          writer, block, cos_table, quant, zigzag, dc_table, ac_table, prev, fdct_tmp,
+          fdct_out, quantised,
         )
         if comp == 0 {
           prev_dc_y = dc

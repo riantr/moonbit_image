@@ -486,13 +486,16 @@ test "golden: jpeg pixels match this decoder's deterministic output" {
       _ => fail("decode_jpeg raised")
     },
     [
-      3, 0, 0, 3, 0, 0, 6, 0, 0, 8, 2, 2, 14, 2, 6, 16, 4, 8, 24, 2, 15, 25, 3, 16,
+      3, 0, 0, 4, 0, 0, 9, 0, 1, 11, 2, 3, 15, 2, 9, 17, 4, 11, 24, 2, 15, 25, 3,
+      16,
     ],
   )
   assert_leading_bytes(
     decode_jpeg(fixture_jpeg_hq_64x64()) catch {
       _ => fail("decode_jpeg raised")
     },
-    [0, 0, 4, 1, 0, 5, 2, 3, 5, 4, 5, 7, 5, 10, 6, 7, 12, 8, 6, 16, 5, 7, 17, 6],
+    [
+      1, 0, 6, 2, 1, 7, 2, 3, 7, 5, 6, 10, 5, 10, 6, 7, 12, 8, 6, 16, 7, 7, 17, 8,
+    ],
   )
 }
