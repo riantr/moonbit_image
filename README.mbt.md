@@ -4,6 +4,23 @@ Pure-MoonBit image decoder / encoder covering **BMP / QOI / TGA / PNG / GIF / JP
 
 This package is forked from [`lws/moonbit_image`](https://github.com/Milky2018/moonbit-image) (MIT, 2025). The original sources were vendored inside `moonbit-labeler/extensions/image/`; this package repackages them as a standalone `mooncakes.io` library so the labeler and any other MoonBit project can depend on a single shared implementation.
 
+## What's new in 0.3.12
+
+**The released package no longer carries the release CI's own log files.**
+
+`moon publish` packages the whole module directory, so the two log files the
+release workflow writes next to the sources — `dryrun.log` and `publish.log` —
+ended up inside the published archive: 147 KiB of compiler warnings and the
+publish output, in a package that consumers download for its codecs. (They
+contain no credentials — the token is never printed — but they are noise.)
+
+The workflow now writes both logs to `$RUNNER_TEMP`, outside the checkout, and
+`.gitignore` excludes `*.log` as a second line of defence: `moon publish`
+leaves ignored files out of the archive, which is the same mechanism that
+already keeps `pkg.generated.mbti` out of it.
+
+No code change: the codecs of 0.3.11 are the codecs of 0.3.12.
+
 ## What's new in 0.3.11
 
 **Six new encoders, written from scratch: PNG, GIF, JPEG, TGA, ICO and TIFF.**
