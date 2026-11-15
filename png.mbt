@@ -13,15 +13,37 @@ priv struct HEntry {
 }
 
 ///|
+/// The number of bits the fast lookup table covers.
+///
+/// A table of 2^10 entries is 8 KiB and stays in the L1 cache; the codes
+/// that are longer than that are decoded bit by bit from the canonical
+/// tables. The full table would be 2^15 entries - 256 KiB - and every
+/// single symbol would be a cache miss.
+const HUFF_ROOT_BITS : Int32 = 10
+
+///|
 /// Fast lookup Huffman decoder using a prefix table
 priv struct HDecoder {
   table : Array[HEntry]
   tbl_bits : Int32
+  count : Array[Int32]
+  symbol : Array[Int32]
+  max_len : Int32
 }
 
 ///|
 /// Build a canonical Huffman tree from an array of code lengths
-/// Uses a fast lookup table of size 2^tbl_bits for O(1) symbol decoding
+///
+/// The table is a fast lookup table of size 2^tbl_bits for O(1) symbol
+/// decoding, indexed by the next bits of the stream *in stream order* -
+/// the first bit of the stream is the lowest bit of the index. A
+/// canonical code is transmitted most significant bit first, so it is
+/// reversed once here, at build time, rather than once per decoded
+/// symbol.
+///
+/// `count` and `symbol` hold the canonical form: the number of codes
+/// per length and the symbols ordered by length. They are what the slow
+/// path decodes the codes that are longer than the table covers.
 fn build_huffman(cl : Array[Int32], ns : Int32) -> HDecoder {
   // Determine maximum code length
   let mut ml = 0
@@ -31,12 +53,17 @@ fn build_huffman(cl : Array[Int32], ns : Int32) -> HDecoder {
     }
   }
   if ml == 0 {
-    return { table: Array::make(1, { symbol: -1, length: 0, }), tbl_bits: 0, }
+    return {
+      table: Array::make(1, { symbol: -1, length: 0, }),
+      tbl_bits: 0,
+      count: Array::make(16, 0),
+      symbol: Array::make(1, 0),
+      max_len: 0,
+    }
   }
 
   // Count codes per length (RFC 1951 §3.2.2)
   let bc = Array::make(16, 0)
-  let nc = Array::make(16, 0)
   for i = 0; i < ns; i = i + 1 {
     let l = cl[i]
     if l > 0 && l <= 15 {
@@ -44,33 +71,48 @@ fn build_huffman(cl : Array[Int32], ns : Int32) -> HDecoder {
     }
   }
 
-  // Compute the starting code for each length
-  let mut code = 0
-  for b = 1; b <= 15; b = b + 1 {
-    code = (code + bc[b - 1]) << 1
-    nc[b] = code
-  }
-
-  // Build fast lookup table: tbl_bits = ml gives optimal size (2^ml entries)
-  // Kraft inequality guarantees all 2^ml entries are filled for complete Huffman trees
-  let tb = ml
+  // Build the fast lookup table and the canonical symbol list.
+  let tb = if ml > HUFF_ROOT_BITS { HUFF_ROOT_BITS } else { ml }
   let ts = 1 << tb
   let tbl = Array::make(ts, { symbol: -1, length: 0, })
+  let syms = Array::make(ns, 0)
+  let mut nsym = 0
 
-  for i = 0; i < ns; i = i + 1 {
-    let l = cl[i]
-    if l > 0 && l <= 15 {
-      let a = nc[l]
-      nc[l] = a + 1
-      let base = a << (tb - l)
-      let step = 1 << (tb - l)
-      for j = 0; j < step && base + j < ts; j = j + 1 {
-        tbl[base + j] = { symbol: i, length: l, }
+  // The canonical code of a length: the codes of a length are handed out
+  // in symbol order, and the first code of the next length is the first
+  // code of this one shifted left and added to the codes of the
+  // previous length.
+  let mut code = 0
+  let mut l = 1
+  while l <= ml {
+    code = (code + bc[l - 1]) << 1
+    let mut c = code
+    let mut i = 0
+    while i < ns {
+      if cl[i] == l {
+        syms[nsym] = i
+        nsym = nsym + 1
+        if l <= tb {
+          // The code in stream order.
+          let s = reverse_bits(c, l)
+          // Every index whose low `l` bits are `s` belongs to this
+          // symbol.
+          let step = 1 << l
+          let count = 1 << (tb - l)
+          let mut j = 0
+          while j < count {
+            tbl[s + j * step] = { symbol: i, length: l, }
+            j = j + 1
+          }
+        }
+        c = c + 1
       }
+      i = i + 1
     }
+    l = l + 1
   }
 
-  { table: tbl, tbl_bits: tb, }
+  { table: tbl, tbl_bits: tb, count: bc, symbol: syms, max_len: ml, }
 }
 
 ///|
@@ -87,12 +129,51 @@ fn reverse_bits(v : Int32, n : Int32) -> Int32 {
 
 ///|
 /// Decode a single symbol using the fast lookup table
-/// `bits` contains the next `tbl_bits` bits LSB-first; we reverse them because
-/// Huffman codes are transmitted MSB-first but packed LSB-first in DEFLATE
+///
+/// `bits` contains the next `tbl_bits` bits of the stream in stream
+/// order, which is exactly how the table is indexed.
 fn huff_decode(d : HDecoder, bits : Int32) -> (Int32, Int32) {
-  let idx = reverse_bits(bits, d.tbl_bits)
-  let e = d.table[idx]
+  let e = d.table[bits]
   (e.symbol, e.length)
+}
+
+///|
+/// Decode a symbol whose code is longer than the fast lookup table
+/// covers.
+///
+/// The canonical code is rebuilt one bit at a time: the bits of the
+/// stream arrive most significant bit first, and the code of a length
+/// lives in the range that starts at `first`.
+///
+/// Returns the symbol, the length of its code, and the bit buffer and
+/// count with the code's bits already consumed.
+fn huff_decode_long(
+  d : HDecoder,
+  buf : Int32,
+  cnt : Int32,
+) -> (Int32, Int32, Int32, Int32) raise Failure {
+  let mut b = buf
+  let mut c = cnt
+  let mut code = 0
+  let mut first = 0
+  let mut index = 0
+  let mut len = 1
+  while len <= d.max_len {
+    if c <= 0 {
+      raise Failure::Failure("DEFLATE: bad code")
+    }
+    code = (code << 1) | (b & 1)
+    b = b >> 1
+    c = c - 1
+    let n = d.count[len]
+    if code - n < first {
+      return (d.symbol[index + (code - first)], len, b, c)
+    }
+    index = index + n
+    first = (first + n) << 1
+    len = len + 1
+  }
+  raise Failure::Failure("DEFLATE: bad code")
 }
 
 ///|
@@ -177,38 +258,33 @@ let clord : Array[Int32] = [
 //-----------------------------------------------------------------------------
 
 ///|
-/// Ensure at least `need` bits are available in the buffer
-/// Bits are accumulated LSB-first: first bit read is at position 0
-/// When the bit stream is exhausted (e.g., end-of-block padding), returns
-/// whatever bits are available instead of raising. Callers must check `cnt`
-/// to verify sufficient bits were obtained.
-fn ensure_bits(
-  r : BitReader,
+/// Pull bytes into the bit buffer until it holds at least `need` bits,
+/// or the data runs out. Returns the new position, buffer and count.
+///
+/// The bits are accumulated LSB-first: the first bit read is at
+/// position 0. The buffer holds at most 24 bits, so its sign bit is
+/// never set and the arithmetic shift that consumes the bits stays
+/// exact.
+fn dflate_fill(
+  data : Bytes,
+  pos : Int32,
   buf : Int32,
   cnt : Int32,
   need : Int32,
-) -> (BitReader, Int32, Int32) {
-  let mut xr = r
-  let mut xb = buf
-  let mut xc = cnt
-  while xc < need {
-    // Read up to 16 bits at once
-    let to_read = if need - xc > 16 { 16 } else { need - xc }
-    // `read_bits_upto` never raises: when the stream runs out it
-    // returns the bits that were still there. That matters for the
-    // last symbol of the last block, which is often followed by fewer
-    // bits than the lookup table wants.
-    let (nr, val, got) = xr.read_bits_upto(to_read)
-    xr = nr
-    xb = xb | (val << xc)
-    xc = xc + got
-    if got < to_read {
-      // End of the bit stream (e.g. the padding after the final
-      // symbol). Whatever was read is already in the buffer.
+) -> (Int32, Int32, Int32) {
+  let mut p = pos
+  let mut b = buf
+  let mut c = cnt
+  let len = data.length()
+  while c < need && c <= 16 {
+    if p >= len {
       break
     }
+    b = b | (data[p].to_int() << c)
+    c = c + 8
+    p = p + 1
   }
-  (xr, xb, xc)
+  (p, b, c)
 }
 
 ///|
@@ -227,42 +303,61 @@ fn consume(b : Int32, c : Int32, n : Int32) -> (Int32, Int32, Int32) {
 ///|
 /// Decompress DEFLATE-formatted data (pure DEFLATE, no zlib wrapper)
 fn deflate_decompress(data : Bytes) -> Bytes raise Failure {
-  let mut r = BitReader::new(data)
+  let mut pos = 0
+  let mut bb = 0
+  let mut bc = 0
   let out = Buffer()
   let mut fb = false
 
   while !fb {
-    let (r_bf, bf) = r.read_bits(1)
-    r = r_bf
-    let (r_bt, bt) = r.read_bits(2)
-    r = r_bt
+    // The block header: one final-block bit and two type bits.
+    let (np, eb, ec) = dflate_fill(data, pos, bb, bc, 3)
+    pos = np
+    bb = eb
+    bc = ec
+    if bc < 3 {
+      raise Failure::Failure("DEFLATE: truncated block header")
+    }
+    let bf = bb & 1
+    let bt = (bb >> 1) & 3
+    bb = bb >> 3
+    bc = bc - 3
     fb = bf == 1
 
     if bt == 0 {
-      // BTYPE=0: No compression
-      r = r.align_to_byte()
-      let (r_lb, lb) = r.read_bytes(2)
-      r = r_lb
-      let (r_nb, nb) = r.read_bytes(2)
-      r = r_nb
-      let len = lb[0].to_int() | (lb[1].to_int() << 8)
-      let nlen = nb[0].to_int() | (nb[1].to_int() << 8)
+      // BTYPE=0: No compression. The rest of the current byte is
+      // padding, so the buffer is dropped and the stream is read in
+      // whole bytes from here.
+      bb = 0
+      bc = 0
+      if pos + 4 > data.length() {
+        raise Failure::Failure("DEFLATE: truncated stored block")
+      }
+      let len = data[pos].to_int() | (data[pos + 1].to_int() << 8)
+      let nlen = data[pos + 2].to_int() | (data[pos + 3].to_int() << 8)
+      pos = pos + 4
       if (len ^ nlen) != 0xFFFF {
         raise Failure::Failure("DEFLATE: bad uncomp len")
       }
-      let (r_ld, ld) = r.read_bytes(len)
-      r = r_ld
-      out.write_bytes(ld)
+      if pos + len > data.length() {
+        raise Failure::Failure("DEFLATE: truncated stored data")
+      }
+      out.write_bytes(data[pos:pos + len].to_owned())
+      pos = pos + len
     } else if bt == 1 {
       // BTYPE=1: Fixed Huffman codes
-      let (r2, _, _) = decode_block(r, out, fxl, fxd, 0, 0)
-      r = r2
+      let (p2, b2, c2) = decode_block(data, pos, out, fxl, fxd, bb, bc)
+      pos = p2
+      bb = b2
+      bc = c2
     } else if bt == 2 {
       // BTYPE=2: Dynamic Huffman codes
-      let (r_dyn, bb_dyn, bc_dyn, lt, dt) = read_dyn_header(r)
-      r = r_dyn
-      let (r2, _, _) = decode_block(r, out, lt, dt, bb_dyn, bc_dyn)
-      r = r2
+      let (p_dyn, bb_dyn, bc_dyn, lt, dt) = read_dyn_header(data, pos, bb, bc)
+      pos = p_dyn
+      let (p2, b2, c2) = decode_block(data, pos, out, lt, dt, bb_dyn, bc_dyn)
+      pos = p2
+      bb = b2
+      bc = c2
     } else {
       raise Failure::Failure("DEFLATE: bad btype")
     }
@@ -275,41 +370,64 @@ fn deflate_decompress(data : Bytes) -> Bytes raise Failure {
 /// Decode a single DEFLATE block (BTYPE 1 or 2)
 /// Reads literal/length and distance Huffman codes with LZ77 back-references
 fn decode_block(
-  r : BitReader,
+  data : Bytes,
+  pos : Int32,
   out : Buffer,
   lt : HDecoder,
   dt : HDecoder,
   bb0 : Int32,
   bc0 : Int32,
-) -> (BitReader, Int32, Int32) raise Failure {
-  let mut xr = r
+) -> (Int32, Int32, Int32) raise Failure {
+  let mut xp = pos
   let mut bb = bb0
   let mut bc = bc0
   let lb = huff_bits(lt)
   let db = huff_bits(dt)
+  let lmask = if lb > 0 { (1 << lb) - 1 } else { 0 }
+  let dmask = if db > 0 { (1 << db) - 1 } else { 0 }
   let ml = if lb > db { lb } else { db }
   let mut done = false
 
   while !done {
     // Ensure enough bits for a literal/length symbol.
-    // When the stream is exhausted (e.g., after the final block's padding),
-    // ensure_bits returns with ec=0; treat this as normal end-of-block.
-    let (nr, eb, ec) = ensure_bits(xr, bb, bc, ml)
+    // When the stream is exhausted (e.g., after the final block's
+    // padding), the fill returns with ec=0; treat that as the end of
+    // the block.
+    let (np, eb, ec) = dflate_fill(data, xp, bb, bc, ml)
     if ec == 0 {
       done = true
       continue
     }
-    xr = nr
+    xp = np
     bb = eb
     bc = ec
 
-    let (sym, clen) = huff_decode(lt, bb & ((1 << lb) - 1))
-    if clen == 0 || clen > bc {
-      raise Failure::Failure("DEFLATE: bad lit code")
+    // The fast path: one table lookup.
+    let e = lt.table[bb & lmask]
+    let mut sym = e.symbol
+    let clen = e.length
+    if clen == 0 {
+      // The code is longer than the table covers: make sure the whole
+      // code is in the buffer, then rebuild it bit by bit from the
+      // canonical form.
+      let (np1, eb1, ec1) = dflate_fill(data, xp, bb, bc, lt.max_len)
+      xp = np1
+      bb = eb1
+      bc = ec1
+      let (s2, l2, b2, c2) = huff_decode_long(lt, bb, bc)
+      sym = s2
+      bb = b2
+      bc = c2
+      if l2 > bc {
+        raise Failure::Failure("DEFLATE: bad lit code")
+      }
+    } else {
+      if clen > bc {
+        raise Failure::Failure("DEFLATE: bad lit code")
+      }
+      bb = bb >> clen
+      bc = bc - clen
     }
-    let (nb, nc, _) = consume(bb, bc, clen)
-    bb = nb
-    bc = nc
 
     if sym < 256 {
       // Literal byte
@@ -326,8 +444,8 @@ fn decode_block(
       let mut length = lbase[li]
       let ex = lextra[li]
       if ex > 0 {
-        let (nr2, eb2, ec2) = ensure_bits(xr, bb, bc, ex)
-        xr = nr2
+        let (np2, eb2, ec2) = dflate_fill(data, xp, bb, bc, ex)
+        xp = np2
         bb = eb2
         bc = ec2
         let (nb2, nc2, ev) = consume(bb, bc, ex)
@@ -337,17 +455,34 @@ fn decode_block(
       }
 
       // Distance code
-      let (nr3, eb3, ec3) = ensure_bits(xr, bb, bc, db)
-      xr = nr3
+      let (np3, eb3, ec3) = dflate_fill(data, xp, bb, bc, db)
+      xp = np3
       bb = eb3
       bc = ec3
-      let (dc, dcl) = huff_decode(dt, bb & ((1 << db) - 1))
-      if dcl == 0 || dcl > bc {
-        raise Failure::Failure("DEFLATE: bad dist code")
+      let de = dt.table[bb & dmask]
+      let mut dc = de.symbol
+      let dcl = de.length
+      if dcl == 0 {
+        // The code is longer than the table covers: make sure the
+        // whole code is in the buffer first.
+        let (np1, eb1, ec1) = dflate_fill(data, xp, bb, bc, dt.max_len)
+        xp = np1
+        bb = eb1
+        bc = ec1
+        let (s3, l3, b3, c3) = huff_decode_long(dt, bb, bc)
+        dc = s3
+        bb = b3
+        bc = c3
+        if l3 > bc {
+          raise Failure::Failure("DEFLATE: bad dist code")
+        }
+      } else {
+        if dcl > bc {
+          raise Failure::Failure("DEFLATE: bad dist code")
+        }
+        bb = bb >> dcl
+        bc = bc - dcl
       }
-      let (nb3, nc3, _) = consume(bb, bc, dcl)
-      bb = nb3
-      bc = nc3
 
       if dc >= 30 {
         raise Failure::Failure("DEFLATE: bad distance")
@@ -355,8 +490,8 @@ fn decode_block(
       let mut dist = dbase[dc]
       let dex = dextra[dc]
       if dex > 0 {
-        let (nr4, eb4, ec4) = ensure_bits(xr, bb, bc, dex)
-        xr = nr4
+        let (np4, eb4, ec4) = dflate_fill(data, xp, bb, bc, dex)
+        xp = np4
         bb = eb4
         bc = ec4
         let (nb4, nc4, ev) = consume(bb, bc, dex)
@@ -393,22 +528,25 @@ fn decode_block(
     }
   }
 
-  (xr, bb, bc)
+  (xp, bb, bc)
 }
 
 ///|
 /// Read dynamic Huffman header for BTYPE=2 blocks
 /// Returns the literal/length and distance Huffman decoders
 fn read_dyn_header(
-  r : BitReader,
-) -> (BitReader, Int32, Int32, HDecoder, HDecoder) raise Failure {
-  let mut xr = r
-  let mut bb = 0
-  let mut bc = 0
+  data : Bytes,
+  pos : Int32,
+  bb0 : Int32,
+  bc0 : Int32,
+) -> (Int32, Int32, Int32, HDecoder, HDecoder) raise Failure {
+  let mut xp = pos
+  let mut bb = bb0
+  let mut bc = bc0
 
   // Read HLIT (5 bits), HDIST (5 bits), HCLEN (4 bits)
-  let (nr, nb, nc) = ensure_bits(xr, bb, bc, 14)
-  xr = nr
+  let (np, nb, nc) = dflate_fill(data, xp, bb, bc, 14)
+  xp = np
   bb = nb
   bc = nc
   let (b1, c1, hl) = consume(bb, bc, 5)
@@ -428,8 +566,8 @@ fn read_dyn_header(
   // Read code length code lengths in clord order
   let cll = Array::make(19, 0)
   for i = 0; i < ncl; i = i + 1 {
-    let (nr2, eb2, ec2) = ensure_bits(xr, bb, bc, 3)
-    xr = nr2
+    let (np2, eb2, ec2) = dflate_fill(data, xp, bb, bc, 3)
+    xp = np2
     bb = eb2
     bc = ec2
     let (nb2, nc2, len) = consume(bb, bc, 3)
@@ -444,8 +582,8 @@ fn read_dyn_header(
   let mut i = 0
 
   while i < nl + nd {
-    let (nr3, eb3, ec3) = ensure_bits(xr, bb, bc, huff_bits(clt))
-    xr = nr3
+    let (np3, eb3, ec3) = dflate_fill(data, xp, bb, bc, huff_bits(clt))
+    xp = np3
     bb = eb3
     bc = ec3
     let (sym, cl) = huff_decode(clt, bb & ((1 << huff_bits(clt)) - 1))
@@ -464,8 +602,8 @@ fn read_dyn_header(
       if i == 0 {
         raise Failure::Failure("DEFLATE: rep with no prev")
       }
-      let (nr4, eb4, ec4) = ensure_bits(xr, bb, bc, 2)
-      xr = nr4
+      let (np4, eb4, ec4) = dflate_fill(data, xp, bb, bc, 2)
+      xp = np4
       bb = eb4
       bc = ec4
       let (nb4, nc4, ex) = consume(bb, bc, 2)
@@ -479,8 +617,8 @@ fn read_dyn_header(
       }
     } else if sym == 17 {
       // Repeat zero (3-10 times)
-      let (nr5, eb5, ec5) = ensure_bits(xr, bb, bc, 3)
-      xr = nr5
+      let (np5, eb5, ec5) = dflate_fill(data, xp, bb, bc, 3)
+      xp = np5
       bb = eb5
       bc = ec5
       let (nb5, nc5, ex) = consume(bb, bc, 3)
@@ -493,8 +631,8 @@ fn read_dyn_header(
       }
     } else {
       // Repeat zero (11-138 times)
-      let (nr6, eb6, ec6) = ensure_bits(xr, bb, bc, 7)
-      xr = nr6
+      let (np6, eb6, ec6) = dflate_fill(data, xp, bb, bc, 7)
+      xp = np6
       bb = eb6
       bc = ec6
       let (nb6, nc6, ex) = consume(bb, bc, 7)
@@ -518,7 +656,7 @@ fn read_dyn_header(
     dla[j] = cls[nl + j]
   }
 
-  (xr, bb, bc, build_huffman(lla, nl), build_huffman(dla, nd))
+  (xp, bb, bc, build_huffman(lla, nl), build_huffman(dla, nd))
 }
 
 //-----------------------------------------------------------------------------
