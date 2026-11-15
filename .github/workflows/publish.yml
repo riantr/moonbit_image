@@ -208,15 +208,21 @@ jobs:
       #
       # `2>&1` matters - this CLI writes these lines to stderr, so a
       # stdout-only capture would see an empty log and fail the grep.
+      #
+      # The log goes to $RUNNER_TEMP, not into the checkout: `moon publish`
+      # packages the whole module directory, so a log file written next to
+      # the sources ends up inside the released archive. The .gitignore
+      # excludes *.log as a second line of defence, but a clean checkout
+      # is the better answer.
       - name: Verify credentials (dry run)
         run: |
           set -uo pipefail
-          moon publish --dry-run --verbose 2>&1 | tee dryrun.log || true
-          if grep -q "Server status: 202 Accepted" dryrun.log; then
+          moon publish --dry-run --verbose 2>&1 | tee "$RUNNER_TEMP/dryrun.log" || true
+          if grep -q "Server status: 202 Accepted" "$RUNNER_TEMP/dryrun.log"; then
             echo "credentials accepted by the server (dry run, no side effects)"
           else
             echo "::error::the dry run did not confirm credentials with the server"
-            grep -E "Server status|Error" dryrun.log || echo "(no server response in the log)"
+            grep -E "Server status|Error" "$RUNNER_TEMP/dryrun.log" || echo "(no server response in the log)"
             exit 1
           fi
 
@@ -238,7 +244,7 @@ jobs:
           # that writes it: the dry run above reads the same file, and a trap
           # there deletes it before the dry run gets to it.
           trap 'rm -f "$HOME/.moon/credentials.json"' EXIT
-          moon publish --verbose 2>&1 | tee publish.log \
+          moon publish --verbose 2>&1 | tee "$RUNNER_TEMP/publish.log" \
             || echo "::warning::moon publish exited $? - the registry check below is authoritative"
 
       # The authority for whether anything actually landed. It reads

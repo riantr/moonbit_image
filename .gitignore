@@ -12,6 +12,11 @@ pkg.generated.mbti
 publish_*.log
 pub_*.log
 
+# Every log file: the release CI writes its publish logs into the
+# checkout, and `moon publish` packages the whole directory, so an
+# ignored file is also a file that stays out of the released package.
+*.log
+
 # Editor / OS noise
 .DS_Store
 Thumbs.db
