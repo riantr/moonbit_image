@@ -4,6 +4,93 @@ Pure-MoonBit image decoder / encoder covering **BMP / QOI / TGA / PNG / GIF / JP
 
 This package is forked from [`lws/moonbit_image`](https://github.com/Milky2018/moonbit-image) (MIT, 2025). The original sources were vendored inside `moonbit-labeler/extensions/image/`; this package repackages them as a standalone `mooncakes.io` library so the labeler and any other MoonBit project can depend on a single shared implementation.
 
+## What's new in 0.3.13
+
+**This release is the result of a speed and quality comparison against the
+reference implementation, `mizchi/image`.**
+
+The codecs here were written from scratch, so the question "are we as good as
+the reference?" needed an answer that was measured rather than asserted. Two
+harnesses now do that, both under `.tools/` (a dot-directory, so nothing of
+them is published):
+
+* `.tools/cross_check_encoders.py` — encodes the same images with these
+  encoders, with the independent `mizchi/image` encoders and, as the
+  tie-breaker, with Pillow, then compares the *decoded pixels*. 84
+  image/format pairs, zero failures.
+* `.tools/bench_encoders.py` — measures encode and decode wall time against
+  `mizchi/image`, and the size of what each side writes.
+
+**The comparison found two real bugs, both fixed here.**
+
+* **The TIFF decoder could not read a TIFF that `mizchi/image` wrote.** The
+  decoder only accepted uncompressed, single-strip files, so every LZW or
+  Deflate TIFF from another writer was rejected outright. The decoder now
+  handles compression 1, 5 (LZW), 8 / 32946 (Deflate) and 32773 (PackBits),
+  multiple strips, and the horizontal differencing predictor. Files in both
+  directions now decode.
+* **The GIF encoder wrote corrupt files once the LZW table filled up.** The
+  table was never cleared at the clear code, so the encoder kept handing out
+  codes that the decoder read as different strings. A 256×256 image with more
+  than 4096 distinct strings produced a file that Pillow could not open. The
+  table is now emptied with the clear code, as the format requires.
+
+The GIF encoder also got a k-d tree for the palette lookup, which replaced a
+linear scan over the palette for every pixel.
+
+**The JPEG decoder is about six times faster, and closer to the reference
+output.**
+
+* The inverse DCT is now the AAN butterfly — the factorisation libjpeg uses —
+  instead of a direct 8×8 matrix product. The butterfly computes the
+  transform up to a per-frequency diagonal, which is cancelled for free by
+  folding it into the quantisation table.
+* The Huffman decoder reads the next eight bits at once through a lookup
+  table, instead of one bit at a time, and the bit reader keeps its bits in
+  an accumulator instead of copying itself on every read.
+* Decoding a block allocates nothing: the scratch buffers belong to the
+  caller.
+
+Measured against `mizchi/image` on 256×256 images, the JPEG decode went from
+**18.9× slower to 3.4× slower**, and the decoded pixels are *closer* to
+Pillow's than before: on the 64×64 reference sample, 5 of the first 24 bytes
+now differ from Pillow, against 13 before.
+
+**The TIFF encoder writes compressed files now.**
+
+It writes LZW-compressed strips with the horizontal differencing predictor,
+like the reference does. A 256×256 RGB image went from 786 894 bytes
+uncompressed to 297 460 — the reference writes 286 382 for the same image.
+The compression costs about 2.1× the reference's encode time.
+
+**The PNG inflater was rewritten** around a stream-order Huffman table and a
+local bit buffer, which took the PNG decode from 7.4× slower than the
+reference to 4.1×.
+
+**The JPEG encoder** now uses a flattened cosine table and allocates nothing
+per block, which took about a fifth off its encode time.
+
+**What is still slower, and why.**
+
+The reference's PNG codec delegates to a MoonBit port of zlib, and its JPEG
+codec uses hand-written SIMD on wasm. On native both sides are scalar, and
+these gaps remain: PNG encode 1.8×, PNG decode 4.1×, GIF decode 4.2×, TIFF
+decode 1.9×, ICO decode 2.5×, JPEG decode 3.4×, JPEG encode 7.1×, TIFF
+encode 2.1×. The JPEG encoder is the largest one: the reference uses
+libjpeg's integer "islow" forward DCT, while this package uses a
+floating-point separable one.
+
+The GIF encoder deserves a note. The reference refuses any image with more
+than 256 distinct colours; this package quantises them with a median cut
+instead. On the one image both sides can encode, the outputs are the same
+size and this encoder takes about 2.6× longer. The per-image average of a
+whole benchmark run is an artefact of that: two of the three benchmark
+images are ones the reference rejects, so the average counts work the
+reference never does.
+
+**Quality is unchanged: on every image and every format, this package is not
+measurably further from the source than the reference encoder is.**
+
 ## What's new in 0.3.12
 
 **The released package no longer carries the release CI's own log files.**
@@ -42,7 +129,7 @@ written here.
 | JPEG | `encode_jpeg(image, quality)` | baseline sequential (SOF0), JFIF APP0, 4:4:4 (no chroma subsampling), Annex K quantisation and Huffman tables, 8-point forward DCT; JPEG has no alpha channel, so alpha is dropped |
 | TGA | `encode_tga` / `encode_tga_rle` | types 2 / 3 (uncompressed) and types 10 / 11 (run-length encoded), 24-bit BGR or 32-bit BGRA |
 | ICO | `encode_ico` | `ICONDIR` + one 16-byte directory entry + a DIB-only payload (`BITMAPINFOHEADER`, bottom-up BGRA XOR bitmap, 1-bpp AND mask padded to 4 bytes) |
-| TIFF | `encode_tiff` | little-endian (`II`), uncompressed, single strip; 1 sample for gray, 3 for RGB, 4 for RGBA (`ExtraSamples = 2`) |
+| TIFF | `encode_tiff` | little-endian (`II`), LZW-compressed strips with the horizontal differencing predictor; 1 sample for gray, 3 for RGB, 4 for RGBA (`ExtraSamples = 2`) |
 
 `encode(img, format)` dispatches to all eight encoders (JPEG at quality 85),
 and `ImageFormat::is_encodable()` now reports `true` for BMP, QOI, TGA, PNG,
@@ -350,6 +437,8 @@ Both files embed the real `testdata/` samples as byte-for-byte literals, so the 
 
 `.tools/cross_check_encoders.py` is the cross-implementation check described in the 0.3.11 notes: it builds a throwaway project that depends on this package *and* on `mizchi/image`, encodes the same images with both, and compares the decoded pixels against Pillow. It is a separate script rather than a test in the package precisely because this package ships with zero external runtime dependencies — `mizchi/image` must never enter the dependency graph of the published module, so the comparison happens outside it.
 
+`.tools/bench_encoders.py` is its speed counterpart, added in 0.3.13: it measures the encode and decode wall time of both implementations on the same images, and the size of what each side writes. Both harnesses share the same rule — the reference implementation's own output is the fixture the two decoders read, so both decoders see identical bytes.
+
 The PNG / GIF / TGA golden pixel values are byte-identical to a reference decode of the same files. The JPEG ones are this decoder's own deterministic output: the samples are 4:2:0 and this decoder upsamples chroma nearest-neighbour, while libjpeg uses "fancy" triangular upsampling, so the chroma channels differ from libjpeg by a few units. Both are valid 4:2:0 decodes.
 
 ## License
@@ -374,3 +463,4 @@ under the MIT license.
 - 0.3.8 core compatibility (`try?` removal) and js / wasm-gc targets © 2026 RiantR, MIT.
 - 0.3.10 TGA v2-footer detection fix and the JPEG / PNG / GIF / TGA decode tests © 2026 RiantR, MIT.
 - 0.3.11 the PNG / GIF / JPEG / TGA / ICO / TIFF encoders, the JPEG / PNG / ICO / TIFF decoder fixes and the cross-implementation check © 2026 RiantR, MIT.
+- 0.3.13 the speed and quality comparison against `mizchi/image`, the AAN inverse DCT and the fast Huffman decoder, the TIFF LZW / PackBits / Deflate decoder and LZW encoder, the GIF encoder fixes and the speed benchmark © 2026 RiantR, MIT.
