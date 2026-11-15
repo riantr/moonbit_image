@@ -4,6 +4,76 @@ Pure-MoonBit image decoder / encoder covering **BMP / QOI / TGA / PNG / GIF / JP
 
 This package is forked from [`lws/moonbit_image`](https://github.com/Milky2018/moonbit-image) (MIT, 2025). The original sources were vendored inside `moonbit-labeler/extensions/image/`; this package repackages them as a standalone `mooncakes.io` library so the labeler and any other MoonBit project can depend on a single shared implementation.
 
+## What's new in 0.3.11
+
+**Six new encoders, written from scratch: PNG, GIF, JPEG, TGA, ICO and TIFF.**
+
+Until 0.3.10 this package could only *write* QOI and BMP; every other format
+was decode-only and `encode()` raised `DecodeError::EncodeNotImplemented` for
+it. 0.3.11 adds an encoder for six of the seven remaining decodable formats.
+FIM stays decode-only — it is a detector stream, not a picture format.
+
+Every encoder is implemented in MoonBit inside this package. There is no
+compression library, no FFI and no new dependency: the DEFLATE compressor, the
+GIF LZW compressor, the JPEG forward DCT and the Huffman tables are all
+written here.
+
+| Format | Entry point | What it writes |
+|---|---|---|
+| PNG | `encode_png` | 8-bit Gray / Gray+Alpha / RGB / RGBA, colour type taken from the pixel format, five row filters chosen by the minimal-absolute-sum heuristic, hand-written DEFLATE (fixed Huffman + LZ77 with a 32 KiB window) |
+| GIF | `encode_gif` | GIF89a, one frame, global colour table, binary transparency, LZW; exact palette when the image has few enough colours, median-cut quantisation otherwise |
+| JPEG | `encode_jpeg(image, quality)` | baseline sequential (SOF0), JFIF APP0, 4:4:4 (no chroma subsampling), Annex K quantisation and Huffman tables, 8-point forward DCT; JPEG has no alpha channel, so alpha is dropped |
+| TGA | `encode_tga` / `encode_tga_rle` | types 2 / 3 (uncompressed) and types 10 / 11 (run-length encoded), 24-bit BGR or 32-bit BGRA |
+| ICO | `encode_ico` | `ICONDIR` + one 16-byte directory entry + a DIB-only payload (`BITMAPINFOHEADER`, bottom-up BGRA XOR bitmap, 1-bpp AND mask padded to 4 bytes) |
+| TIFF | `encode_tiff` | little-endian (`II`), uncompressed, single strip; 1 sample for gray, 3 for RGB, 4 for RGBA (`ExtraSamples = 2`) |
+
+`encode(img, format)` dispatches to all eight encoders (JPEG at quality 85),
+and `ImageFormat::is_encodable()` now reports `true` for BMP, QOI, TGA, PNG,
+GIF, JPEG, ICO and TIFF.
+
+**Three decoder bugs that the new encoders exposed.**
+
+Writing an encoder is also a way of testing a decoder, and three shipping bugs
+turned up. All three are fixed here:
+
+* **The JPEG decoder transposed every 8×8 block.** The inverse DCT kept its
+  intermediate in a transposed layout and wrote the result back transposed as
+  well, so every decoded JPEG was mirrored in 8×8 tiles. Straight against
+  transposed, the error was 5048 versus 70 — and Pillow disagreed with the
+  decoder on every non-trivial image. The luma now agrees with libjpeg within
+  1–5 units; the chroma still differs, because this decoder upsamples
+  nearest-neighbour while libjpeg uses a triangular filter.
+* **The PNG inflater lost the tail of the stream.** `BitReader::read_bits`
+  raises when the stream runs out and drops the bits it had already
+  consumed, so the last DEFLATE symbol went missing whenever the final
+  padding was shorter than the longest Huffman code (9 bits for the fixed
+  table). A 12×9 PNG that Pillow reads perfectly failed with
+  `DEFLATE: bad lit code`. The short read now returns the bits that were
+  actually available instead of raising.
+* **The ICO decoder read DIB-only entries at double height.** An icon's DIB
+  covers the XOR bitmap *and* the AND mask, so `biHeight` is twice the icon
+  height — and the BMP decoder took it for the image height.
+
+A fourth, smaller one: the TIFF decoder rejected 4-sample RGB files, so a
+TIFF with an alpha channel could not be read at all. It now accepts
+`photometric = 2` with 3 or 4 samples and reports RGBA8 for the latter.
+
+**How the encoders were verified.**
+
+`.tools/cross_check_encoders.py` encodes the same images with these encoders,
+with the independent `mizchi/image` encoders and, as the tie-breaker, with
+Pillow — and compares the *decoded pixels*, because two implementations of the
+same compression never agree on the bytes. The package's own decoders are
+checked against Pillow too, which is how the JPEG transposition was found: the
+package's own tests only asserted dimensions and pixel format, never the
+pixels themselves.
+
+The current run is 84 image/format pairs with zero failures. Two differences
+are documented rather than "fixed": the JPEG chroma upsampling described
+above, and the GIF palette, where a different quantiser legitimately picks
+different colours — the check is that ours is never measurably further from
+the source image than the reference encoder's.
+
 ## What's new in 0.3.10
 
 **`detect_format()` no longer crashes on TGA files that carry a v2 footer.**
@@ -215,11 +285,18 @@ pub fn fim_ratio_grayscale(low : Image, high : Image) -> Image raise Failure
 pub fn fim_ratio_pseudo_color(low : Image, high : Image) -> Image raise Failure
 pub fn fim_ratio_pseudo_color_hsb(low : Image, high : Image) -> Image raise Failure
 
-// writers (QOI + BMP only); encode() raises DecodeError::EncodeNotImplemented
-// for everything else (including FIM)
+// writers (QOI, BMP, PNG, GIF, JPEG, TGA, ICO, TIFF); encode() raises
+// DecodeError::EncodeNotImplemented for FIM only
 pub fn encode(image : Image, format : ImageFormat) -> Bytes raise DecodeError
 pub fn encode_qoi(image : Image) -> Bytes raise Failure
 pub fn encode_bmp(image : Image) -> Bytes raise Failure
+pub fn encode_png(image : Image) -> Bytes raise Failure
+pub fn encode_gif(image : Image) -> Bytes raise Failure
+pub fn encode_jpeg(image : Image, quality : Int32) -> Bytes raise Failure
+pub fn encode_tga(image : Image) -> Bytes raise Failure
+pub fn encode_tga_rle(image : Image) -> Bytes raise Failure
+pub fn encode_ico(image : Image) -> Bytes raise Failure
+pub fn encode_tiff(image : Image) -> Bytes raise Failure
 ```
 
 `Image` is `{ width, height, format, data }` where `format` is one of `Gray8 / GrayA8 / RGB8 / RGBA8`. The `Color` struct, `Image::to_rgba8 / to_grayscale / flip_horizontal / rotate_* / resize_* / brighten / histogram / average_color`, and the color-space conversion methods on `Color` (`to_hsl / from_hsl / to_hsv / from_hsv / blend / lerp / distance / to_gray`) are all available.
@@ -246,12 +323,15 @@ let qoi = @moonbit_image.encode(half, ImageFormat::QOI)
 
 ## Tests
 
-`moon test --target native` runs two test files, **70 tests** in total:
+`moon test --target native` runs three test files, **131 tests** in total:
 
 * **`lib_test.mbt`** (45 tests) — format detection for all 9 codecs, header reading, decode round-trips for QOI + BMP, ICO / TIFF / FIM decode, colour math, geometric transforms, and a fuzz sweep over random pixels / random crops.
 * **`lib_test_codecs.mbt`** (25 tests) — decode coverage for the four codecs that previously had none: JPEG (1×1 plus two 64×64 baseline samples), PNG (1×1 RGBA, 16×16 indexed → RGBA8, 32×32 RGBA), GIF (1×1, 32×32, plus the 8×8 animated sample through `decode_gif_all`), and TGA (1×1 24-bit, 32×32 grayscale → Gray8, 32×32 RGBA). Covers the unified `decode()` routing and the `image_dimensions()` fast path for each, and pins the leading pixel bytes of every sample.
+* **`lib_test_writers.mbt`** (61 tests) — the encoders: an encode → own-decoder round trip for every format that can be written, the file structure of each container (PNG signature, GIF header and trailer, JPEG markers, ICO directory, TIFF tags), the edge cases (1×1, 1×7, 7×1, 12×9, 13×9, 33×17, zero-sized images) and the regression tests for the bugs listed above.
 
 Both files embed the real `testdata/` samples as byte-for-byte literals, so the suite needs no filesystem access at run time. `lib_test_codecs.mbt` is generated by `.tools/gen_codec_tests.py` — re-run that script (it invokes `moon fmt` itself) whenever a sample in `testdata/` changes. `.tools/mutation_check.py` breaks one codec at a time on a scratch copy of the tree and asserts that the suite catches every mutation; it is the evidence that these tests actually discriminate. Both scripts live under `.tools/` so that `moon publish` leaves them out of the released package while they stay tracked in git.
+
+`.tools/cross_check_encoders.py` is the cross-implementation check described in the 0.3.11 notes: it builds a throwaway project that depends on this package *and* on `mizchi/image`, encodes the same images with both, and compares the decoded pixels against Pillow. It is a separate script rather than a test in the package precisely because this package ships with zero external runtime dependencies — `mizchi/image` must never enter the dependency graph of the published module, so the comparison happens outside it.
 
 The PNG / GIF / TGA golden pixel values are byte-identical to a reference decode of the same files. The JPEG ones are this decoder's own deterministic output: the samples are 4:2:0 and this decoder upsamples chroma nearest-neighbour, while libjpeg uses "fancy" triangular upsampling, so the chroma channels differ from libjpeg by a few units. Both are valid 4:2:0 decodes.
 
@@ -276,3 +356,4 @@ under the MIT license.
 - 0.3.7 license consolidation (drop Apache-2.0 dual grant) © 2026 RiantR, MIT.
 - 0.3.8 core compatibility (`try?` removal) and js / wasm-gc targets © 2026 RiantR, MIT.
 - 0.3.10 TGA v2-footer detection fix and the JPEG / PNG / GIF / TGA decode tests © 2026 RiantR, MIT.
+- 0.3.11 the PNG / GIF / JPEG / TGA / ICO / TIFF encoders, the JPEG / PNG / ICO / TIFF decoder fixes and the cross-implementation check © 2026 RiantR, MIT.
