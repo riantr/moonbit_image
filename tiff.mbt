@@ -60,10 +60,12 @@ pub fn decode_tiff(data : Bytes) -> Image raise Failure {
   if width <= 0 || height <= 0 {
     raise Failure::Failure("TIFF: invalid dimensions")
   }
-  if compression != 1 {
-    raise Failure::Failure(
-      "TIFF: only no-compression (1) supported, got " + compression.to_string(),
-    )
+  match compression {
+    1 | 5 | 8 | 32946 | 32773 => ()
+    _ =>
+      raise Failure::Failure(
+        "TIFF: unsupported compression " + compression.to_string(),
+      )
   }
   if planar != 1 {
     raise Failure::Failure("TIFF: only chunky planar config (1) supported")
@@ -96,20 +98,49 @@ pub fn decode_tiff(data : Bytes) -> Image raise Failure {
       )
   }
 
-  // Strip offsets / counts — we require exactly one strip covering the
-  // whole image. StripOffsets may be SHORT or LONG, so the array entry
-  // length determines the type to read.
+  // Strip offsets / counts.  A file may hold more than one strip; every
+  // strip is decompressed on its own and the rows are concatenated.
+  // StripOffsets may be SHORT or LONG, so the array entry length determines
+  // the type to read.
   let strip_offsets = get_long_array(entries, TAG_STRIP_OFFSETS)
   let strip_byte_counts = get_long_array(entries, TAG_STRIP_BYTE_COUNTS)
-  if strip_offsets.length() != 1 || strip_byte_counts.length() != 1 {
-    raise Failure::Failure("TIFF: only single-strip layout supported")
+  if strip_offsets.length() == 0 ||
+    strip_offsets.length() != strip_byte_counts.length() {
+    raise Failure::Failure("TIFF: strip offsets and byte counts disagree")
   }
-  let strip_offset = strip_offsets[0]
-  let strip_size = strip_byte_counts[0]
-  if strip_offset + strip_size > data.length() {
-    raise Failure::Failure("TIFF: strip out of bounds")
+  let rows_per_strip = get_long(entries, TAG_ROWS_PER_STRIP)
+  let rps = if rows_per_strip <= 0 { height } else { rows_per_strip }
+  let predictor = get_short(entries, TAG_PREDICTOR, 1)
+  if predictor != 1 && predictor != 2 {
+    raise Failure::Failure(
+      "TIFF: unsupported Predictor " + predictor.to_string(),
+    )
   }
-  let strip = data[strip_offset:strip_offset + strip_size].to_owned()
+  // The bytes one row of the raw data holds.
+  let row_bytes = (width * samples * bits + 7) / 8
+  let raw : Array[Byte] = []
+  for s = 0; s < strip_offsets.length(); s = s + 1 {
+    let off = strip_offsets[s]
+    let size = strip_byte_counts[s]
+    if off < 0 || size < 0 || off + size > data.length() {
+      raise Failure::Failure("TIFF: strip out of bounds")
+    }
+    let strip = data[off:off + size].to_owned()
+    let rows = if (s + 1) * rps > height { height - s * rps } else { rps }
+    if rows <= 0 {
+      continue
+    }
+    let decoded = decompress_strip(strip, compression, rows * row_bytes)
+    let plain = if predictor == 2 {
+      undo_horizontal_predictor(decoded, row_bytes, samples, bits)
+    } else {
+      decoded
+    }
+    for i = 0; i < plain.length(); i = i + 1 {
+      raw.push(plain[i])
+    }
+  }
+  let strip = Bytes::from_array(raw)
 
   // Palette (only when photometric == 3)
   let palette = if photometric == 3 {
@@ -167,6 +198,9 @@ const TAG_STRIP_BYTE_COUNTS : Int32 = 279
 
 ///|
 const TAG_PLANAR_CONFIG : Int32 = 284
+
+///|
+const TAG_PREDICTOR : Int32 = 317
 
 ///|
 const TAG_COLOR_MAP : Int32 = 320
@@ -347,6 +381,241 @@ fn read_color_map(
     }
     None =>
       raise Failure::Failure("TIFF: PhotometricInterpretation=3 needs ColorMap")
+  }
+}
+
+// ----- Strip decompression --------------------------------------------------
+
+///|
+/// Undo the horizontal differencing predictor (TIFF tag 317 = 2).
+///
+/// The encoder stored, for every row, the difference between a sample and
+/// the sample `samples` positions before it.  The decoder adds them back.
+/// Only 8 and 16 bit samples carry the predictor; for the packed sub-byte
+/// depths the tag is not defined, so the data is passed through unchanged.
+fn undo_horizontal_predictor(
+  data : Bytes,
+  row_bytes : Int32,
+  samples : Int32,
+  bits : Int32,
+) -> Bytes raise Failure {
+  if bits != 8 && bits != 16 {
+    return data
+  }
+  if row_bytes <= 0 {
+    return data
+  }
+  let arr = Array::make(data.length(), b'\x00')
+  for i = 0; i < data.length(); i = i + 1 {
+    arr[i] = data[i]
+  }
+  let rows = data.length() / row_bytes
+  for r = 0; r < rows; r = r + 1 {
+    let base = r * row_bytes
+    if bits == 8 {
+      for i in samples..<row_bytes {
+        let v = (arr[base + i].to_int() + arr[base + i - samples].to_int()) &
+          0xFF
+        arr[base + i] = v.to_byte()
+      }
+    } else {
+      let n = row_bytes / 2
+      for i in samples..<n {
+        let lo = arr[base + i * 2].to_int()
+        let hi = arr[base + i * 2 + 1].to_int()
+        let plo = arr[base + (i - samples) * 2].to_int()
+        let phi = arr[base + (i - samples) * 2 + 1].to_int()
+        let v = (((hi << 8) | lo) + ((phi << 8) | plo)) & 0xFFFF
+        arr[base + i * 2] = (v & 0xFF).to_byte()
+        arr[base + i * 2 + 1] = ((v >> 8) & 0xFF).to_byte()
+      }
+    }
+  }
+  Bytes::from_array(arr)
+}
+
+///|
+/// PackBits run-length decoding (TIFF compression 32773).
+///
+/// A run of 2..128 equal bytes is stored as `257 - n` followed by the byte;
+/// anything else is a literal group of up to 128 bytes, stored as `n - 1`
+/// followed by the bytes.  A count byte of 128 means "no-op".
+fn tiff_packbits_decode(src : Bytes, expected : Int32) -> Bytes {
+  let out : Array[Byte] = []
+  let mut i = 0
+  let n = src.length()
+  while i < n && out.length() < expected {
+    let count = src[i].to_int()
+    i = i + 1
+    if count == 128 {
+      continue
+    } else if count < 128 {
+      // A literal run of count + 1 bytes.
+      let len = count + 1
+      let mut k = 0
+      while k < len && i < n {
+        out.push(src[i])
+        i = i + 1
+        k = k + 1
+      }
+    } else {
+      // A run of 257 - count equal bytes.
+      if i >= n {
+        break
+      }
+      let value = src[i]
+      i = i + 1
+      let len = 257 - count
+      let mut k = 0
+      while k < len {
+        out.push(value)
+        k = k + 1
+      }
+    }
+  }
+  Bytes::from_array(out)
+}
+
+///|
+/// TIFF LZW decompression (Adobe TIFF 6.0 section 13).
+///
+/// The codes are packed most significant bit first, start at nine bits and
+/// grow to twelve.  256 is the clear code and 257 the end-of-information
+/// code; the first free code is 258.  The dictionary is a prefix/suffix
+/// table, so a code expands into a chain of bytes that is walked backwards
+/// into a stack.
+///
+/// The code width grows one code before the table fills it - the "early
+/// change" of the TIFF dialect - which is what keeps the decoder in step
+/// with the encoder.
+fn tiff_lzw_decode(src : Bytes, expected : Int32) -> Bytes raise Failure {
+  if src.length() >= 2 && src[0] == b'\x00' && (src[1].to_int() & 1) == 1 {
+    raise Failure::Failure("TIFF: old-style (LSB-first) LZW is not supported")
+  }
+  let prefix = Array::make(4096, 0)
+  let suffix = Array::make(4096, b'\x00')
+  // The first 256 entries are the literal bytes: the suffix of a root code
+  // is the byte itself.
+  for i = 0; i < 256; i = i + 1 {
+    suffix[i] = i.to_byte()
+  }
+  let stack = Array::make(4096, b'\x00')
+  let out : Array[Byte] = []
+  let mut bit_buf = 0
+  let mut bit_count = 0
+  let mut pos = 0
+  let mut next = 258
+  let mut width = 9
+  let mut prev = -1
+  while out.length() < expected {
+    while bit_count < width && pos < src.length() {
+      bit_buf = (bit_buf << 8) | src[pos].to_int()
+      bit_count = bit_count + 8
+      pos = pos + 1
+    }
+    if bit_count < width {
+      break
+    }
+    let code = (bit_buf >> (bit_count - width)) & ((1 << width) - 1)
+    bit_count = bit_count - width
+    bit_buf = bit_buf & ((1 << bit_count) - 1)
+    if code == 256 {
+      // Clear: the dictionary starts over.
+      next = 258
+      width = 9
+      prev = -1
+      continue
+    }
+    if code == 257 {
+      break
+    }
+    if prev < 0 {
+      if code > 255 {
+        raise Failure::Failure("TIFF: invalid LZW code")
+      }
+      out.push(suffix[code])
+      prev = code
+      continue
+    }
+    // Expand the code into the stack, which holds the bytes in reverse
+    // order, so that popping from its top yields the right sequence.
+    let is_kwkwk = code == next
+    let mut sp = 0
+    if is_kwkwk {
+      // The code refers to the entry that is being created: the expansion is
+      // the one of the previous code, followed by its own first byte.
+      let mut c = prev
+      while c >= 258 {
+        stack[sp] = suffix[c]
+        sp = sp + 1
+        c = prefix[c]
+      }
+      stack[sp] = suffix[c]
+      sp = sp + 1
+      // The stack holds the bytes in reverse order, so the extra byte - the
+      // last byte of the expansion - goes to the front of it.  Everything
+      // else shifts one slot up.
+      let extra = stack[sp - 1]
+      let mut j = sp
+      while j > 0 {
+        stack[j] = stack[j - 1]
+        j = j - 1
+      }
+      stack[0] = extra
+      sp = sp + 1
+    } else {
+      if code > next {
+        raise Failure::Failure("TIFF: invalid LZW code")
+      }
+      let mut c = code
+      while c >= 258 {
+        stack[sp] = suffix[c]
+        sp = sp + 1
+        c = prefix[c]
+      }
+      stack[sp] = suffix[c]
+      sp = sp + 1
+    }
+    let first = stack[sp - 1]
+    if next < 4096 {
+      prefix[next] = prev
+      suffix[next] = first
+      next = next + 1
+      // Early change: widen one code before the table fills the width.
+      if next + 1 >= 1 << width && width < 12 {
+        width = width + 1
+      }
+    }
+    prev = code
+    while sp > 0 {
+      sp = sp - 1
+      out.push(stack[sp])
+    }
+  }
+  Bytes::from_array(out)
+}
+
+///|
+/// Decompress one strip according to its compression tag.
+fn decompress_strip(
+  strip : Bytes,
+  compression : Int32,
+  expected : Int32,
+) -> Bytes raise Failure {
+  match compression {
+    1 => strip
+    5 => tiff_lzw_decode(strip, expected)
+    32773 => tiff_packbits_decode(strip, expected)
+    8 =>
+      // Adobe Deflate: a zlib stream, so the two byte header and the
+      // trailing Adler-32 are stripped before the raw deflate data.
+      if strip.length() < 2 {
+        raise Failure::Failure("TIFF: truncated deflate strip")
+      } else {
+        deflate_decompress(strip[2:strip.length() - 4].to_owned())
+      }
+    32946 => deflate_decompress(strip)
+    _ => raise Failure::Failure("TIFF: unsupported compression")
   }
 }
 

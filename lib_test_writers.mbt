@@ -966,11 +966,16 @@ test "tiff: encode produces a little-endian header" {
   assert_eq(bytes[1], b'I')
   assert_eq(bytes[2], 42)
   assert_eq(bytes[3], 0)
-  // The IFD starts right after the 8 byte header.
-  assert_eq(bytes[4], 8)
-  assert_eq(bytes[5], 0)
-  assert_eq(bytes[6], 0)
-  assert_eq(bytes[7], 0)
+  // The strip data sits between the header and the IFD, so the IFD starts
+  // after it.  The offset has to point at the entry count.
+  let ifd = bytes[4].to_int() +
+    bytes[5].to_int() * 256 +
+    bytes[6].to_int() * 65536 +
+    bytes[7].to_int() * 16777216
+  assert_true(ifd >= 8)
+  assert_true(ifd < bytes.length())
+  let count = bytes[ifd].to_int() + bytes[ifd + 1].to_int() * 256
+  assert_true(count == 12)
 }
 
 ///|
@@ -978,13 +983,17 @@ test "tiff: the IFD records the dimensions" {
   let img = synth_rgba8(6, 3)
   let bytes = encode_tiff(img) catch { _ => fail("encode_tiff raised") }
   // The IFD starts with the entry count, then the entries.
-  let count = bytes[8].to_int() + bytes[9].to_int() * 256
-  assert_true(count == 11)
+  let ifd = bytes[4].to_int() +
+    bytes[5].to_int() * 256 +
+    bytes[6].to_int() * 65536 +
+    bytes[7].to_int() * 16777216
+  let count = bytes[ifd].to_int() + bytes[ifd + 1].to_int() * 256
+  assert_true(count == 12)
   // The first entry is ImageWidth (tag 256), the second ImageLength.
-  assert_eq(bytes[10], 0)
-  assert_eq(bytes[11], 1)
-  assert_eq(bytes[18], 6) // biWidth
-  assert_eq(bytes[30], 3) // biHeight
+  assert_eq(bytes[ifd + 2], 0)
+  assert_eq(bytes[ifd + 3], 1)
+  assert_eq(bytes[ifd + 10], 6) // biWidth
+  assert_eq(bytes[ifd + 22], 3) // biHeight
 }
 
 ///|
