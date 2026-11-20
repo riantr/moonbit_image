@@ -7,7 +7,7 @@
 
 ///|
 /// All pixel formats supported by this library
-pub enum PixelFormat {
+pub(all) enum PixelFormat {
   /// 8-bit grayscale (1 byte per pixel)
   Gray8
   /// 16-bit grayscale with alpha (2 bytes per pixel)
@@ -24,7 +24,7 @@ pub enum PixelFormat {
 
 ///|
 /// Image file formats that can be detected and decoded
-pub enum ImageFormat {
+pub(all) enum ImageFormat {
   BMP
   QOI
   TGA
@@ -34,7 +34,8 @@ pub enum ImageFormat {
   /// Microsoft Windows icon container (`.ico`); each entry holds an
   /// embedded BMP (DIB only, no file header) or a full PNG.
   ICO
-  /// Tagged Image File Format, baseline uncompressed only in this build.
+  /// Tagged Image File Format, baseline subset (little-endian, no JPEG
+  /// compression) in this build.
   TIFF
   /// CETC BVE-series X-ray security-scanner raw detector stream
   /// (`.fim`); 16-bit little-endian column-major payload after a

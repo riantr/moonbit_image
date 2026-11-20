@@ -1,11 +1,15 @@
 // White-box tests for the image library using real binary fixtures.
 //
-// MoonBit 0.1.20260803 makes every `pub enum` variant read-only for code
-// outside the defining package — neither explicit constructors
-// (`PixelFormat::RGBA8`, `ImageFormat::BMP`) nor Option::None literals
-// can be written in this test file. So:
+// As of 0.3.14 `PixelFormat` and `ImageFormat` are `pub(all)`, so their
+// variants can be constructed from anywhere -- including through the
+// package name (`@moonbit_image.PixelFormat::RGBA8`), which is how an
+// external consumer sees them. Before that they were `pub`, which made
+// every variant read-only outside the defining package and left the
+// README's Quick start unable to compile.
+//
+// This file still takes the conservative route on purpose:
 //   * every Image is materialised by `decode()` against a hand-built
-//     binary fixture;
+//     binary fixture, so the decoder is exercised rather than bypassed;
 //   * every format-name lookup goes through the runtime `detect_format`
 //     path instead of asking for a named variant;
 //   * encoder coverage is restricted to `encode_qoi` / `encode_bmp`,
@@ -206,7 +210,8 @@ test "blackbox: detect_format rejects 7-byte (under PNG sig length)" {
 
 // ---------------------------------------------------------------------------
 // Real-file fixtures: decode_ico / decode_tiff exercised against actual
-// bytes (see lib_test_fixtures.mbt, generated from testdata/).
+// bytes (the fixtures are embedded below as byte-for-byte literals, so the
+// suite needs no filesystem access).
 // ---------------------------------------------------------------------------
 
 ///|
