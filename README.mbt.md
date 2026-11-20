@@ -4,6 +4,82 @@ Pure-MoonBit image decoder / encoder covering **BMP / QOI / TGA / PNG / GIF / JP
 
 This package is forked from [`lws/moonbit_image`](https://github.com/Milky2018/moonbit-image) (MIT, 2025). The original sources were vendored inside `moonbit-labeler/extensions/image/`; this package repackages them as a standalone `mooncakes.io` library so the labeler and any other MoonBit project can depend on a single shared implementation.
 
+## What's new in 0.3.14
+
+**A QA pass found and fixed an out-of-bounds defect in every decoder.**
+
+The package went through a static analysis pass and then a malformed-input
+sweep: 28 080 deliberately corrupted images — truncations, single flipped header
+bytes, oversized dimension fields, random noise — fed to the decoders.
+**1 311 of them crashed the 0.3.13 release.** The patched tree crashes on none
+of them.
+
+The root cause was one pattern, repeated across the codecs. The decoders read
+dimensions, offsets and table sizes out of the file into an `Int32`, and an
+`Int32` overflow — or a `u32` above 2³¹ read into a signed field — produces a
+**negative** number. A negative offset passes every bounds check that compares it
+against a length, so the read or write that follows goes out of bounds. A
+corrupt header turned into a panic in somebody else's image pipeline.
+
+Six classes of defect, all fixed here:
+
+| # | Defect | Where |
+|---|---|---|
+| 1 | A `u32` above 2³¹ read into a signed `Int32` came back negative | `utils.mbt` |
+| 2 | Bounds checks whose own arithmetic overflowed an `Int32` | `bmp.mbt`, `tga.mbt`, `ico.mbt`, `tiff.mbt`, `png.mbt` |
+| 3 | Allocation sizes computed from file-derived dimensions overflowed | `bmp.mbt`, `tga.mbt`, `qoi.mbt`, `png.mbt`, `tiff.mbt`, `fim.mbt` |
+| 4 | Reads with no bounds check at all | the GIF colour tables, the JPEG marker loop |
+| 5 | An unchecked write destination in the BMP RLE decoders | `bmp.mbt` |
+| 6 | The JPEG decoder trusted the *contents* of each segment | `jpeg.mbt` |
+
+The fix adds `checked_mul`, a `MAX_DECODE_PIXELS` cap (2²⁷ pixels — the same cap
+the reference implementation uses) and `check_decode_size`, rewrites every region
+check into `Int64` or difference form, and adds the bounds checks that were
+missing. The four fields that are *not* sizes — the BMP height (signed by the
+specification), the PNG chunk CRC, the ICO DIB height and TIFF tag values — are
+now read as raw bit patterns through a separate `read_u32_bits_*` pair, so they
+are no longer rejected for being "too large".
+
+**Two more bugs surfaced while writing the regression test.**
+
+* **The GIF graphic-control extension was read one byte too far.** The block is
+  six bytes — size, packed field, delay, transparent index, terminator — and the
+  check asked for five, so a file that ends right after the transparent index
+  passed the check and the terminator read went past the end of the buffer. Only
+  `decode_gif_all`, the animation path, reaches that code.
+* **The Quick start below did not compile for a consumer.** `PixelFormat` and
+  `ImageFormat` were `pub enum`, which makes their variants read-only outside
+  the defining package, so an external project could not write
+  `ImageFormat::QOI`. They are `pub(all)` now, which is purely additive: the
+  variants were already writable inside the package.
+
+**The package now ships a malformed-input regression test.** `fuzz_test.mbt` is
+new. It embeds the `testdata/` fixtures, mutates them deterministically and
+feeds every mutation to every decoder; a panic fails the test. It is native-only
+(see the `options` block in `moon.pkg`), and `moon test --target native` now runs
+**145 tests** in about three seconds.
+
+The test has teeth: run against the unpatched 0.3.13 sources it crashes, and
+against 0.3.14 it passes. The sweep it is built on now also covers
+`decode_gif_all`, the animation path, which the original pass did not reach —
+that is how the graphic-control bug above was found. Over the full corpus —
+28 080 mutated inputs across all 21 fixtures, through `decode`,
+`image_dimensions` and `decode_gif_all` — the patched tree reports zero
+crashes.
+
+**The codec output is unchanged.** Every fix is a bounds check or a rejection of
+a malformed header; no decoder produces different pixels for a valid file. The
+speed and quality figures in the 0.3.13 notes below were re-measured for this
+release and updated where they had drifted.
+
+**This release also corrects the documentation.** The claims below were checked
+against the code and a number of them did not survive: the TIFF support table
+was stale, two `DecodeError` variants were documented as active when nothing
+raises them, the API surface was missing five public functions and gave the
+wrong integer type in five signatures, the test inventory described a fuzz sweep
+that did not exist, and the JPEG byte-count comparison quoted numbers that do
+not reproduce. All of them are fixed in this release.
+
 ## What's new in 0.3.13
 
 **This release is the result of a speed and quality comparison against the
@@ -52,20 +128,21 @@ output.**
   caller.
 
 Measured against `mizchi/image` on 256×256 images, the JPEG decode went from
-**18.9× slower to 3.4× slower**, and the decoded pixels are *closer* to
-Pillow's than before: on the 64×64 reference sample, 5 of the first 24 bytes
-now differ from Pillow, against 13 before.
+**18.9× slower to 3.3× slower**, and the decoded pixels are *closer* to
+Pillow's than before: on the 64×64 natural sample, 6 of the first 24 bytes of
+the decoded RGB output now differ from Pillow's, against 13 before, and the
+largest of those differences is 2 instead of 3.
 
 **The TIFF encoder writes compressed files now.**
 
 It writes LZW-compressed strips with the horizontal differencing predictor,
 like the reference does. A 256×256 RGB image went from 786 894 bytes
 uncompressed to 297 460 — the reference writes 286 382 for the same image.
-The compression costs about 2.1× the reference's encode time.
+The compression costs about 2.3× the reference's encode time.
 
 **The PNG inflater was rewritten** around a stream-order Huffman table and a
 local bit buffer, which took the PNG decode from 7.4× slower than the
-reference to 4.1×.
+reference to 4.0×.
 
 **The JPEG encoder** now uses a flattened cosine table and allocates nothing
 per block, which took about a fifth off its encode time.
@@ -74,9 +151,9 @@ per block, which took about a fifth off its encode time.
 
 The reference's PNG codec delegates to a MoonBit port of zlib, and its JPEG
 codec uses hand-written SIMD on wasm. On native both sides are scalar, and
-these gaps remain: PNG encode 1.8×, PNG decode 4.1×, GIF decode 4.2×, TIFF
-decode 1.9×, ICO decode 2.5×, JPEG decode 3.4×, JPEG encode 7.1×, TIFF
-encode 2.1×. The JPEG encoder is the largest one: the reference uses
+these gaps remain: PNG encode 1.8×, PNG decode 4.0×, GIF decode 5.1×, TIFF
+decode 2.1×, ICO decode 3.4×, JPEG decode 3.3×, JPEG encode 7.4×, TIFF
+encode 2.3×. The JPEG encoder is the largest one: the reference uses
 libjpeg's integer "islow" forward DCT, while this package uses a
 floating-point separable one.
 
@@ -297,20 +374,26 @@ re-runs, so 0.3.3 is safe to depend on for downstream production work.
 
   The largest entry by area (with the first entry as the tie-breaker) is returned.
 
-* **`decode_tiff`** handles baseline uncompressed TIFF only. The supported subset is documented explicitly so callers know what to expect:
+* **`decode_tiff`** handles baseline TIFF. The supported subset in **0.3.0** was deliberately narrow, and it has grown since — 0.3.13 added LZW, PackBits and Deflate, multiple strips and the horizontal predictor. The current subset is:
 
   | Field | Supported |
   |---|---|
   | Byte order | `II` (little-endian); `MM` raises `InvalidHeader` |
-  | Compression | `1` (none); LZW / Deflate / JPEG-in-TIFF rejected |
+  | Compression | `1` (none), `5` (LZW), `8` / `32946` (Deflate), `32773` (PackBits) |
+  | Predictor | `1` (none), `2` (horizontal differencing) |
   | Photometric | `0` (WhiteIsZero), `1` (BlackIsZero), `2` (RGB), `3` (Palette) |
   | BitsPerSample | 1 / 2 / 4 / 8 / 16 (uniform across samples) |
-  | SamplesPerPixel | 1 (greyscale / palette) or 3 (RGB) |
+  | SamplesPerPixel | 1 (greyscale / palette), 3 (RGB) or 4 (RGBA) |
   | PlanarConfiguration | `1` (chunky); planar rejected |
-  | Layout | single strip only |
+  | Layout | one or more strips; every strip is decompressed on its own |
   | Sample format | UINT |
 
   16-bit samples are right-shifted to 8 bits for output — display-friendly but lossy for photographic TIFFs. The ColorMap tag is read and palette indices are expanded to RGBA8.
+
+  One inconsistency is worth knowing about: `detect_format` recognises *both*
+  byte orders (`II*\0` and `MM\0*`) and reports `TIFF` for either, but the
+  decoder only reads little-endian files, so a big-endian TIFF is detected and
+  then rejected with `InvalidHeader`.
 
 * **`detect_format`** recognises both the new magic byte sequences (`II*\0`, `MM\0*` for TIFF; `00 00 01 00 NN …` for ICO).
 
@@ -325,12 +408,12 @@ re-runs, so 0.3.3 is safe to depend on for downstream production work.
   | Variant | When it fires |
   |---|---|
   | `DecodeError::UnsupportedFormat(String)` | magic bytes do not match any known format signature |
-  | `DecodeError::TruncatedData(String)` | a frame / chunk / scanline ended in the middle of a read |
-  | `DecodeError::InvalidHeader(String)` | a header field is out of range or has an unsupported value |
-  | `DecodeError::InvalidValue(String)` | a header / pixel-data value was readable but rejected downstream |
+  | `DecodeError::TruncatedData(String)` | *reserved* — no codec raises it yet |
+  | `DecodeError::InvalidHeader(String)` | a header field is out of range or has an unsupported value; this is what every codec-level `Failure` is wrapped as |
+  | `DecodeError::InvalidValue(String)` | *reserved* — no codec raises it yet |
   | `DecodeError::EncodeNotImplemented(String)` | `encode()` was called with a decode-only format |
 
-  Callers can `match err { ... }` on the variant to branch on the cause; each variant carries its own `String` payload with the diagnostic message. (`DecodeError` does not implement `Show` / `to_string()`, so build the message from the matched payload.) The per-codec helpers (`decode_bmp`, `decode_qoi`, …) and low-level byte readers (`read_u32_le`, …) keep raising the built-in `Failure` suberror; the public wrappers translate it.
+  Callers can `match err { ... }` on the variant to branch on the cause; each variant carries its own `String` payload with the diagnostic message. (`DecodeError` does not implement `Show` / `to_string()`, so build the message from the matched payload.) The per-codec helpers (`decode_bmp`, `decode_qoi`, …) and low-level byte readers (`read_u32_le`, …) keep raising the built-in `Failure` suberror; the public wrappers translate it. `TruncatedData` and `InvalidValue` are kept so downstream callers can match exhaustively without churn, but nothing raises them today — a truncated file is reported as `InvalidHeader`.
 
 * **Removed legacy convenience APIs**: `is_supported_format` and `is_encode_supported`. Use the new `ImageFormat::is_decodable() / is_encodable()` instance methods instead — they take an `ImageFormat` and read better in `match` arms:
 
@@ -356,11 +439,17 @@ re-runs, so 0.3.3 is safe to depend on for downstream production work.
 ## API surface
 
 ```mbt nocheck
+// format sniffing; None when the magic bytes match nothing
+pub fn detect_format(data : Bytes) -> ImageFormat?
+
 // one-shot auto-detect decoder; raises DecodeError
 pub fn decode(data : Bytes) -> Image raise DecodeError
 
+// decode a file whose format is already known; skips the sniffing step
+pub fn decode_by_format(data : Bytes, format : ImageFormat) -> Image raise DecodeError
+
 // header-only dimension read (no pixel decode)
-pub fn image_dimensions(data : Bytes) -> (Int, Int, ImageFormat) raise DecodeError
+pub fn image_dimensions(data : Bytes) -> (Int32, Int32, ImageFormat) raise DecodeError
 
 // per-format decoders (still raise the lower-level Failure)
 pub fn decode_bmp(data : Bytes) -> Image raise Failure
@@ -369,17 +458,22 @@ pub fn decode_tga(data : Bytes) -> Image raise Failure
 pub fn decode_png(data : Bytes) -> Image raise Failure
 pub fn decode_gif(data : Bytes) -> Image raise Failure
 pub fn decode_jpeg(data : Bytes) -> Image raise Failure
+pub fn decode_ico(data : Bytes) -> Image raise Failure
+pub fn decode_tiff(data : Bytes) -> Image raise Failure
 pub fn decode_fim(data : Bytes) -> Image raise Failure            // dual-energy side-by-side, Gray8
 pub fn decode_fim_raw(data : Bytes) -> Image raise Failure         // raw 16-bit detector, GrayA8
-pub fn fim_dimensions(data : Bytes) -> (Int, Int) raise Failure    // raw detector (width, height)
+pub fn fim_dimensions(data : Bytes) -> (Int32, Int32) raise Failure    // raw detector (width, height)
+
+// the GIF animation path: every frame, composited onto the logical screen
+pub fn decode_gif_all(data : Bytes) -> AnimatedImage raise Failure
 
 // FIM geometry helpers (GrayA8 in, GrayA8 out)
 pub fn fim_side_by_side(left : Image, right : Image) -> Image raise Failure
 pub fn fim_split_rows(img : Image) -> (Image, Image) raise Failure
 pub fn fim_split_cols(img : Image) -> (Image, Image) raise Failure
-pub fn fim_apply_y_roll(img : Image, shift_px : Int) -> Image raise Failure
-pub fn fim_find_bright_strip(img : Image, air_threshold? : Double = 50000.0) -> (Int, Int) raise Failure
-pub fn fim_find_auto_y_roll(img : Image) -> Int raise Failure
+pub fn fim_apply_y_roll(img : Image, shift_px : Int32) -> Image raise Failure
+pub fn fim_find_bright_strip(img : Image, air_threshold? : Double = 50000.0) -> (Int32, Int32) raise Failure
+pub fn fim_find_auto_y_roll(img : Image) -> Int32 raise Failure
 
 // FIM renderers
 pub fn fim_to_grayscale8(img : Image, invert? : Bool = true, degamma? : Bool = false,
@@ -405,6 +499,15 @@ pub fn encode_tiff(image : Image) -> Bytes raise Failure
 
 `Image` is `{ width, height, format, data }` where `format` is one of `Gray8 / GrayA8 / RGB8 / RGBA8`. The `Color` struct, `Image::to_rgba8 / to_grayscale / flip_horizontal / rotate_* / resize_* / brighten / histogram / average_color`, and the color-space conversion methods on `Color` (`to_hsl / from_hsl / to_hsv / from_hsv / blend / lerp / distance / to_gray`) are all available.
 
+`PixelFormat` and `ImageFormat` are `pub(all)`, so their variants can be
+constructed from outside the package — `ImageFormat::QOI` works in a consumer's
+own code, not just inside this one.
+
+One caveat about `image_dimensions`: it is a header-only read for BMP, QOI, TGA,
+PNG, GIF, JPEG and FIM, but **ICO and TIFF have to walk their directory**, so
+for those two it falls back to a full decode and is not the fast path its name
+suggests.
+
 ## Quick start
 
 ```mbt nocheck
@@ -422,18 +525,24 @@ let img = @moonbit_image.decode(jpeg_bytes) catch {
 let half = img.resize_nearest(img.width / 2, img.height / 2)
 
 ///|
-let qoi = @moonbit_image.encode(half, ImageFormat::QOI)
+let qoi = @moonbit_image.encode(half, @moonbit_image.ImageFormat::QOI)
 ```
+
+The enum variants are written through the package name here on purpose:
+`ImageFormat` is `pub(all)`, so `@moonbit_image.ImageFormat::QOI` is how a
+consumer names it. (Before 0.3.14 the enums were `pub`, which made every
+variant read-only outside the package — this example did not compile.)
 
 ## Tests
 
-`moon test --target native` runs three test files, **131 tests** in total:
+`moon test --target native` runs four test files, **145 tests** in total:
 
-* **`lib_test.mbt`** (45 tests) — format detection for all 9 codecs, header reading, decode round-trips for QOI + BMP, ICO / TIFF / FIM decode, colour math, geometric transforms, and a fuzz sweep over random pixels / random crops.
+* **`lib_test.mbt`** (45 tests) — format detection for all 9 codecs, header reading, decode round-trips for QOI + BMP, ICO / TIFF / FIM decode, colour math and geometric transforms.
 * **`lib_test_codecs.mbt`** (25 tests) — decode coverage for the four codecs that previously had none: JPEG (1×1 plus two 64×64 baseline samples), PNG (1×1 RGBA, 16×16 indexed → RGBA8, 32×32 RGBA), GIF (1×1, 32×32, plus the 8×8 animated sample through `decode_gif_all`), and TGA (1×1 24-bit, 32×32 grayscale → Gray8, 32×32 RGBA). Covers the unified `decode()` routing and the `image_dimensions()` fast path for each, and pins the leading pixel bytes of every sample.
 * **`lib_test_writers.mbt`** (61 tests) — the encoders: an encode → own-decoder round trip for every format that can be written, the file structure of each container (PNG signature, GIF header and trailer, JPEG markers, ICO directory, TIFF tags), the edge cases (1×1, 1×7, 7×1, 12×9, 13×9, 33×17, zero-sized images) and the regression tests for the bugs listed above.
+* **`fuzz_test.mbt`** (14 tests, native-only) — the malformed-input regression net added in 0.3.14. It embeds the `testdata/` fixtures, mutates them deterministically and feeds every mutation to `decode`, `image_dimensions` and `decode_gif_all`; a panic fails the test. One test per defect class pins the exact header that used to crash.
 
-Both files embed the real `testdata/` samples as byte-for-byte literals, so the suite needs no filesystem access at run time. `lib_test_codecs.mbt` is generated by `.tools/gen_codec_tests.py` — re-run that script (it invokes `moon fmt` itself) whenever a sample in `testdata/` changes. `.tools/mutation_check.py` breaks one codec at a time on a scratch copy of the tree and asserts that the suite catches every mutation; it is the evidence that these tests actually discriminate. Both scripts live under `.tools/` so that `moon publish` leaves them out of the released package while they stay tracked in git.
+`lib_test_codecs.mbt` and `fuzz_test.mbt` embed the real `testdata/` samples as byte-for-byte literals, so the suite needs no filesystem access at run time. `lib_test_codecs.mbt` is generated by `.tools/gen_codec_tests.py` — re-run that script (it invokes `moon fmt` itself) whenever a sample in `testdata/` changes. `.tools/mutation_check.py` breaks one codec at a time on a scratch copy of the tree and asserts that the suite catches every mutation; it is the evidence that these tests actually discriminate. Both scripts live under `.tools/` so that `moon publish` leaves them out of the released package while they stay tracked in git.
 
 `.tools/cross_check_encoders.py` is the cross-implementation check described in the 0.3.11 notes: it builds a throwaway project that depends on this package *and* on `mizchi/image`, encodes the same images with both, and compares the decoded pixels against Pillow. It is a separate script rather than a test in the package precisely because this package ships with zero external runtime dependencies — `mizchi/image` must never enter the dependency graph of the published module, so the comparison happens outside it.
 
@@ -464,3 +573,4 @@ under the MIT license.
 - 0.3.10 TGA v2-footer detection fix and the JPEG / PNG / GIF / TGA decode tests © 2026 RiantR, MIT.
 - 0.3.11 the PNG / GIF / JPEG / TGA / ICO / TIFF encoders, the JPEG / PNG / ICO / TIFF decoder fixes and the cross-implementation check © 2026 RiantR, MIT.
 - 0.3.13 the speed and quality comparison against `mizchi/image`, the AAN inverse DCT and the fast Huffman decoder, the TIFF LZW / PackBits / Deflate decoder and LZW encoder, the GIF encoder fixes and the speed benchmark © 2026 RiantR, MIT.
+- 0.3.14 the malformed-input hardening of every decoder, the `pub(all)` enums and the `fuzz_test.mbt` regression net © 2026 RiantR, MIT.
