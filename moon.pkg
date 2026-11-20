@@ -6,3 +6,11 @@ import {
 }
 
 supported_targets = "+native+js+wasm-gc"
+
+// The malformed-input sweep (fuzz_test.mbt) is the slow test in the suite.
+// It only needs to run once per release, on the native target; the JS and
+// wasm-gc builds only have to prove that the decoders still compile.
+
+options(
+  targets: { "fuzz_test.mbt": [ "native" ] },
+)
