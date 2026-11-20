@@ -105,6 +105,7 @@ fn FimDecoder::new(data : Bytes) -> FimDecoder raise Failure {
   if width <= 0 {
     raise Failure::Failure("FIM: invalid detector width: \{width}")
   }
+  check_decode_size(width, data_size / (width * 2))
   if data_size % (width * 2) != 0 {
     raise Failure::Failure(
       "FIM: payload not 16-bit aligned: \{data_size} % \{width * 2}",

@@ -75,7 +75,9 @@ pub fn decode_ico(data : Bytes) -> Image raise Failure {
   let entry_off = 6 + best * 16
   let bytes_in_res = read_u32_le(data, entry_off + 8)
   let image_offset = read_u32_le(data, entry_off + 12)
-  if image_offset + bytes_in_res > data.length() {
+  // Both values are file offsets. The sum is computed as a difference so
+  // that it cannot overflow, and a negative offset is rejected outright.
+  if image_offset > data.length() || bytes_in_res > data.length() - image_offset {
     raise Failure::Failure("ICO: image data out of bounds")
   }
   if bytes_in_res < 4 {
@@ -168,7 +170,7 @@ fn halve_dib_height(dib : Bytes, dib_size : Int32) -> Bytes raise Failure {
     i = i + 1
   }
   if dib_size >= 40 {
-    let height = read_u32_le(dib, 8)
+    let height = read_u32_bits_le(dib, 8)
     write_u32_le(arr, 8, height / 2)
   } else {
     let height = read_u16_le(dib, 6)

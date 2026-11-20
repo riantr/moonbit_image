@@ -55,6 +55,7 @@ fn QoiDecoder::new(data : Bytes) -> QoiDecoder raise Failure {
   if width <= 0 || height <= 0 {
     raise Failure::Failure("QOI: invalid dimensions")
   }
+  check_decode_size(width, height)
   if channels != 3 && channels != 4 {
     raise Failure::Failure("QOI: unsupported channel count: \{channels}")
   }

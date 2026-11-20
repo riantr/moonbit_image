@@ -353,6 +353,7 @@ fn GifDecoder::new(data : Bytes) -> GifDecoder raise Failure {
   if w <= 0 || h <= 0 {
     raise Failure::Failure("GIF: invalid dimensions")
   }
+  check_decode_size(w, h)
 
   let has_gct = packed >> 7 != 0
   let gct_size = 1 << ((packed & 7) + 1)
@@ -361,6 +362,11 @@ fn GifDecoder::new(data : Bytes) -> GifDecoder raise Failure {
   let mut gct = Array::make(0, (0, 0, 0))
   let mut pos = 13
   if has_gct {
+    // The global colour table is gct_size * 3 bytes of the file. A file
+    // that declares one and then stops must be rejected, not read past.
+    if pos + gct_size * 3 > data.length() {
+      raise Failure::Failure("GIF: truncated global color table")
+    }
     gct = Array::make(gct_size, (0, 0, 0))
     for i = 0; i < gct_size; i = i + 1 {
       let r = data[pos].to_int()
@@ -474,7 +480,12 @@ fn GifDecoder::decode(self : GifDecoder) -> Image raise Failure {
 
       if ext_type == 0xF9 {
         // Graphic Control Extension
-        if pos + 5 > self.data.length() {
+        // The block is SIX bytes: the block size, the packed field, the
+        // two-byte delay, the transparent index and the block terminator.
+        // Checking for five let a file that ends right after the
+        // transparent index through, and the terminator read then went
+        // one byte past the end of the buffer.
+        if pos + 6 > self.data.length() {
           raise Failure::Failure("GIF: truncated GCE")
         }
         let _block_size = self.data[pos].to_int() // should be 4
@@ -518,6 +529,10 @@ fn GifDecoder::decode(self : GifDecoder) -> Image raise Failure {
       // Read Local Color Table if present
       let mut active_ct = self.global_ct
       if has_lct {
+        // The local colour table is lct_size * 3 bytes of the file.
+        if pos + lct_size * 3 > self.data.length() {
+          raise Failure::Failure("GIF: truncated local color table")
+        }
         active_ct = Array::make(lct_size, (0, 0, 0))
         for i = 0; i < lct_size; i = i + 1 {
           let r = self.data[pos].to_int()
@@ -546,14 +561,18 @@ fn GifDecoder::decode(self : GifDecoder) -> Image raise Failure {
       let (lzw_data, np) = read_sub_blocks(self.data, pos)
       pos = np
 
-      // Decompress LZW data
+      // Decompress LZW data. The frame dimensions come from the file and
+      // the frame can be LARGER than the logical screen, so they are
+      // capped here rather than trusted.
+      check_decode_size(img_w, img_h)
       let pixel_count = img_w * img_h
       let indices = lzw_decompress(lzw_data, min_code_size, pixel_count)
 
       // Build output image
       let out_w = self.width
       let out_h = self.height
-      let out_size = out_w * out_h * 4
+      check_decode_size(out_w, out_h)
+      let out_size = checked_mul(checked_mul(out_w, out_h), 4)
       let out = Array::make(out_size, b'\x00')
 
       if is_interlaced {
@@ -566,6 +585,12 @@ fn GifDecoder::decode(self : GifDecoder) -> Image raise Failure {
           for x = 0; x < img_w; x = x + 1 {
             let idx = indices[src_base + x].to_int()
             let di = dst_base + x * 4
+            // A frame may be larger than the logical screen. The
+            // specification clips it to the screen, and a pixel outside
+            // the screen is dropped rather than written past the buffer.
+            if di < 0 || di + 3 >= out.length() {
+              continue
+            }
             if has_transparency && idx == transparent_idx {
               // Transparent: alpha=0 (bytes already zero from init)
               continue
@@ -589,6 +614,12 @@ fn GifDecoder::decode(self : GifDecoder) -> Image raise Failure {
           for x = 0; x < img_w; x = x + 1 {
             let idx = indices[src_base + x].to_int()
             let di = dst_base + x * 4
+            // A frame may be larger than the logical screen. The
+            // specification clips it to the screen, and a pixel outside
+            // the screen is dropped rather than written past the buffer.
+            if di < 0 || di + 3 >= out.length() {
+              continue
+            }
             if has_transparency && idx == transparent_idx {
               // Transparent: alpha=0 (bytes already zero from init)
               continue
@@ -653,7 +684,8 @@ fn GifDecoder::decode_all(self : GifDecoder) -> AnimatedImage raise Failure {
   // Canvas state
   let canvas_w = self.width
   let canvas_h = self.height
-  let canvas_size = canvas_w * canvas_h * 4
+  check_decode_size(canvas_w, canvas_h)
+  let canvas_size = checked_mul(checked_mul(canvas_w, canvas_h), 4)
   let canvas = Array::make(canvas_size, b'\x00')
 
   // Pre-compute background color from global color table if available
@@ -678,7 +710,12 @@ fn GifDecoder::decode_all(self : GifDecoder) -> AnimatedImage raise Failure {
 
       if ext_type == 0xF9 {
         // Graphic Control Extension
-        if pos + 5 > self.data.length() {
+        // The block is SIX bytes: the block size, the packed field, the
+        // two-byte delay, the transparent index and the block terminator.
+        // Checking for five let a file that ends right after the
+        // transparent index through, and the terminator read then went
+        // one byte past the end of the buffer.
+        if pos + 6 > self.data.length() {
           raise Failure::Failure("GIF: truncated GCE")
         }
         let _block_size = self.data[pos].to_int()
@@ -744,6 +781,10 @@ fn GifDecoder::decode_all(self : GifDecoder) -> AnimatedImage raise Failure {
       // Read Local Color Table if present
       let mut active_ct = self.global_ct
       if has_lct {
+        // The local colour table is lct_size * 3 bytes of the file.
+        if pos + lct_size * 3 > self.data.length() {
+          raise Failure::Failure("GIF: truncated local color table")
+        }
         active_ct = Array::make(lct_size, (0, 0, 0))
         for i = 0; i < lct_size; i = i + 1 {
           let r = self.data[pos].to_int()
@@ -771,12 +812,18 @@ fn GifDecoder::decode_all(self : GifDecoder) -> AnimatedImage raise Failure {
       let (lzw_data, np) = read_sub_blocks(self.data, pos)
       pos = np
 
-      // Decompress LZW data
+      // Decompress LZW data. The frame dimensions come from the file and
+      // the frame can be LARGER than the logical screen, so they are
+      // capped here rather than trusted.
+      check_decode_size(img_w, img_h)
       let pixel_count = img_w * img_h
       let indices = lzw_decompress(lzw_data, min_code_size, pixel_count)
 
       // Decode frame into RGBA buffer
-      let frame_buf = Array::make(canvas_w * canvas_h * 4, b'\x00')
+      let frame_buf = Array::make(
+        checked_mul(checked_mul(canvas_w, canvas_h), 4),
+        b'\x00',
+      )
 
       // Handle disposal method 2: restore to background before drawing
       if disposal == 2 {

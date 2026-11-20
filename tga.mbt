@@ -47,6 +47,7 @@ fn TgaDecoder::new(data : Bytes) -> TgaDecoder raise Failure {
   if width <= 0 || height <= 0 {
     raise Failure::Failure("TGA: invalid dimensions")
   }
+  check_decode_size(width, height)
 
   // Supported image types
   let rle = match image_type {
@@ -119,15 +120,19 @@ fn TgaDecoder::src_row(self : TgaDecoder, dst_row : Int32) -> Int32 {
 fn TgaDecoder::decode_uncompressed(self : TgaDecoder) -> Image raise Failure {
   let src_bpp = self.src_bpp()
   let out_bpp = if self.pixel_depth <= 8 { 1 } else { 4 }
-  let out_size = self.width * self.height * out_bpp
-  let _buf = Array::make(out_size, Byte::default())
+  let out_size = checked_mul(checked_mul(self.width, self.height), out_bpp)
 
   // Row stride (TGA rows are tightly packed, no padding)
-  let src_stride = self.width * src_bpp
-  // Upfront bounds validation: total pixel data region must fit
-  if self.data.length() < self.data_offset + self.height * src_stride {
+  let src_stride = checked_mul(self.width, src_bpp)
+  // Upfront bounds validation: total pixel data region must fit. The
+  // arithmetic is done in Int64: an Int32 overflow produces a NEGATIVE
+  // sum, which would pass this check.
+  let need = self.data_offset.to_int64() +
+    self.height.to_int64() * src_stride.to_int64()
+  if self.data.length().to_int64() < need {
     raise Failure::Failure("TGA: unexpected end of pixel data")
   }
+  let _buf = Array::make(out_size, Byte::default())
 
   for dst_y = 0; dst_y < self.height; dst_y = dst_y + 1 {
     let src_y = self.src_row(dst_y)

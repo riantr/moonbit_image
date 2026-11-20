@@ -987,7 +987,9 @@ pub fn decode_png(data : Bytes) -> Image raise Failure {
     let cbt = data[pos:pos + 4].to_owned()
     pos = pos + 4
 
-    if pos + cl + 4 > data.length() {
+    // Written as a difference: `pos + cl + 4` overflows an Int32 when
+    // the chunk length is corrupt, and an overflowed sum is NEGATIVE.
+    if cl > data.length() - pos - 4 {
       raise Failure::Failure("PNG: trunc chunk data")
     }
 
@@ -996,7 +998,8 @@ pub fn decode_png(data : Bytes) -> Image raise Failure {
     pos = pos + cl
 
     // Read stored CRC
-    let sc = read_u32_be(data, pos)
+    // The stored CRC is an arbitrary 32-bit value, not a size.
+    let sc = read_u32_bits_be(data, pos)
     pos = pos + 4
 
     // Verify CRC for critical chunks (uppercase first letter)
@@ -1106,6 +1109,7 @@ pub fn decode_png(data : Bytes) -> Image raise Failure {
   if w <= 0 || h <= 0 {
     raise Failure::Failure("PNG: bad dims")
   }
+  check_decode_size(w, h)
 
   // Validate color type + bit depth combination
   let vok = match ct {

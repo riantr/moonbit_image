@@ -7,16 +7,16 @@
 // Supported:
 //   * Byte order: little-endian ("II") only. Big-endian ("MM") TIFFs
 //     raise Failure("TIFF: big-endian unsupported in this build").
-//   * Compression: 1 (no compression) only. LZW / Deflate / JPEG-in-
-//     TIFF are rejected up front.
+//   * Compression: 1 (none), 5 (LZW), 8 (Adobe Deflate), 32946
+//     (Deflate) and 32773 (PackBits). JPEG-in-TIFF is rejected up front.
+//   * Predictor: 1 (none) and 2 (horizontal differencing).
 //   * Photometric: 0 (WhiteIsZero), 1 (BlackIsZero), 2 (RGB),
 //     3 (Palette). 4, 5, 6 (CMYK / YCbCr / Lab / ICC) rejected.
 //   * BitsPerSample: 1, 2, 4, 8, 16 (uniform across samples).
-//   * SamplesPerPixel: 1 (greyscale / palette) or 3 (RGB). RGBA / CMYK
-//     rejected.
+//   * SamplesPerPixel: 1 (greyscale / palette), 3 (RGB) or 4 (RGBA).
 //   * PlanarConfiguration: 1 (chunky) only.
-//   * Layout: single strip (StripOffsets / StripByteCounts each have
-//     exactly one entry, RowsPerStrip >= height).
+//   * Layout: one or more strips; every strip is decompressed on its own
+//     and the rows are concatenated.
 //   * Sample format: UINT only.
 //
 // 16-bit samples are right-shifted to 8 bits for output; this is a
@@ -40,6 +40,9 @@ pub fn decode_tiff(data : Bytes) -> Image raise Failure {
     raise Failure::Failure("TIFF: bad magic (expected 42)")
   }
   let ifd_offset = read_u32_le(data, 4)
+  if ifd_offset > data.length() {
+    raise Failure::Failure("TIFF: IFD offset beyond end of file")
+  }
 
   // Parse the (single) IFD. We do NOT follow next_ifd links — multi-
   // page TIFFs decode only the first page, which is what the public
@@ -60,6 +63,7 @@ pub fn decode_tiff(data : Bytes) -> Image raise Failure {
   if width <= 0 || height <= 0 {
     raise Failure::Failure("TIFF: invalid dimensions")
   }
+  check_decode_size(width, height)
   match compression {
     1 | 5 | 8 | 32946 | 32773 => ()
     _ =>
@@ -223,12 +227,15 @@ priv struct IfdEntry {
 
 ///|
 fn parse_ifd(data : Bytes, off : Int32) -> Array[IfdEntry] raise Failure {
-  if off + 2 > data.length() {
+  // The comparisons are written as differences: `off + 2` overflows an
+  // Int32 on a corrupt offset, and an overflowed sum is NEGATIVE, which
+  // would pass the check.
+  if off < 0 || off > data.length() - 2 {
     raise Failure::Failure("TIFF: truncated IFD count")
   }
   let count = read_u16_le(data, off)
   let entries_off = off + 2
-  if entries_off + count * 12 > data.length() {
+  if entries_off > data.length() - count * 12 {
     raise Failure::Failure("TIFF: truncated IFD entries")
   }
   let entries : Array[IfdEntry] = []
@@ -237,7 +244,9 @@ fn parse_ifd(data : Bytes, off : Int32) -> Array[IfdEntry] raise Failure {
     let tag = read_u16_le(data, e)
     let typ = read_u16_le(data, e + 2)
     let cnt = read_u32_le(data, e + 4)
-    let raw = read_u32_le(data, e + 8)
+    // The value slot holds either an inline value (any 32-bit pattern)
+    // or a file offset, so it is read as a bit pattern.
+    let raw = read_u32_bits_le(data, e + 8)
     let values = resolve_value(data, typ, cnt, raw)
     entries.push({ tag, typ, count: cnt, values, })
   }
@@ -260,7 +269,7 @@ fn resolve_value(
     5 => 8
     _ => raise Failure::Failure("TIFF: unsupported type " + typ.to_string())
   }
-  let total = size_per * count
+  let total = checked_mul(size_per, count)
   let values : Array[Int32] = []
   if total <= 4 {
     // Read everything inline from the 4-byte `raw` slot. We pack the
@@ -279,7 +288,7 @@ fn resolve_value(
     }
   } else {
     // Read from the file at `raw` offset.
-    if raw + total > data.length() {
+    if raw < 0 || raw > data.length() - total {
       raise Failure::Failure("TIFF: indirect value out of bounds")
     }
     let mut p = raw
@@ -288,12 +297,12 @@ fn resolve_value(
       let v = match typ {
         1 | 2 => data[p].to_int()
         3 => read_u16_le(data, p)
-        4 => read_u32_le(data, p)
+        4 => read_u32_bits_le(data, p)
         5 =>
           // RATIONAL = num/den. We only store the numerator; consumers
           // (currently only the public decode path) don't read the
           // XResolution / YResolution tags so this never matters.
-          read_u32_le(data, p)
+          read_u32_bits_le(data, p)
         _ => 0
       }
       values.push(v)

@@ -50,8 +50,13 @@ fn BmpDecoder::new(data : Bytes) -> BmpDecoder raise Failure {
   if data[0] != b'B' || data[1] != b'M' {
     raise Failure::Failure("BMP: invalid signature, expected 'BM'")
   }
-  // Read data offset from file header
+  // Read data offset from file header. The offset is a file offset: it
+  // has to point inside the file. read_u32_le already rejects the values
+  // that do not fit in an Int32, and this rejects the ones past the end.
   let data_offset = read_u32_le(data, 10)
+  if data_offset > data.length() {
+    raise Failure::Failure("BMP: pixel data offset beyond end of file")
+  }
   // Read DIB header
   if data.length() < 18 {
     raise Failure::Failure("BMP: file too small for DIB header")
@@ -63,7 +68,10 @@ fn BmpDecoder::new(data : Bytes) -> BmpDecoder raise Failure {
     )
   }
   let width_raw = read_u32_le(data, 18)
-  let height_raw = read_u32_le(data, 22)
+  // The BMP height is a SIGNED field: a negative height means top-down
+  // row order. It must be read as a bit pattern, not as an unsigned
+  // value that is rejected for being "too large".
+  let height_raw = read_u32_bits_le(data, 22)
   // Height can be signed: positive = bottom-up, negative = top-down
   let top_down = height_raw < 0
   let height = if top_down { -height_raw } else { height_raw }
@@ -71,6 +79,7 @@ fn BmpDecoder::new(data : Bytes) -> BmpDecoder raise Failure {
   if width <= 0 || height <= 0 {
     raise Failure::Failure("BMP: invalid dimensions")
   }
+  check_decode_size(width, height)
   let bpp = read_u16_le(data, 28)
   let compression = read_u32_le(data, 30)
   // biClrUsed at DIB offset 32..35. 0 means default (2^bpp). We don't
@@ -141,10 +150,10 @@ fn palette_to_rgba_bytes(palette : Array[Color]) -> Array[Array[Byte]] {
 
 ///|
 /// Row stride in bytes (padded to 4-byte boundary)
-fn bmp_row_stride(width : Int32, bpp : Int32) -> Int32 {
-  let row_bits = width * bpp
+fn bmp_row_stride(width : Int32, bpp : Int32) -> Int32 raise Failure {
+  let row_bits = checked_mul(width, bpp)
   let row_bytes = (row_bits + 7) / 8
-  (row_bytes + 3) / 4 * 4
+  checked_mul((row_bytes + 3) / 4, 4)
 }
 
 ///|
@@ -156,6 +165,12 @@ fn write_palette_pixel(
   num_colors : Int32,
   palette_rgba : Array[Array[Byte]],
 ) -> Unit {
+  // The palette index is bounds-checked; the DESTINATION is not, and the
+  // RLE decoders can move the cursor past the end of a row with a delta
+  // escape. An unchecked destination is an out-of-bounds WRITE.
+  if dst < 0 || dst + 3 >= _buf.length() {
+    return
+  }
   if idx < num_colors {
     let c = palette_rgba[idx]
     _buf[dst] = c[0]
@@ -174,11 +189,16 @@ fn write_palette_pixel(
 /// Decode 32-bit BGRA
 fn BmpDecoder::decode_rgba(self : BmpDecoder) -> Image raise Failure {
   let stride = bmp_row_stride(self.width, 32)
-  // Upfront bounds validation: total pixel data region must fit
-  if self.data.length() < self.data_offset + self.height * stride {
+  // Upfront bounds validation: total pixel data region must fit. The
+  // arithmetic is done in Int64 because `data_offset + height * stride`
+  // overflows an Int32 on a corrupt header, and an overflowed sum is
+  // NEGATIVE, which would make this check pass.
+  let need = self.data_offset.to_int64() +
+    self.height.to_int64() * stride.to_int64()
+  if self.data.length().to_int64() < need {
     raise Failure::Failure("BMP: unexpected end of pixel data")
   }
-  let out_size = self.width * self.height * 4
+  let out_size = checked_mul(checked_mul(self.width, self.height), 4)
   let _buf = Array::make(out_size, Byte::default())
 
   for row = 0; row < self.height; row = row + 1 {
@@ -206,11 +226,16 @@ fn BmpDecoder::decode_rgba(self : BmpDecoder) -> Image raise Failure {
 /// Decode 24-bit BGR
 fn BmpDecoder::decode_24bit(self : BmpDecoder) -> Image raise Failure {
   let stride = bmp_row_stride(self.width, 24)
-  // Upfront bounds validation: total pixel data region must fit
-  if self.data.length() < self.data_offset + self.height * stride {
+  // Upfront bounds validation: total pixel data region must fit. The
+  // arithmetic is done in Int64 because `data_offset + height * stride`
+  // overflows an Int32 on a corrupt header, and an overflowed sum is
+  // NEGATIVE, which would make this check pass.
+  let need = self.data_offset.to_int64() +
+    self.height.to_int64() * stride.to_int64()
+  if self.data.length().to_int64() < need {
     raise Failure::Failure("BMP: unexpected end of pixel data")
   }
-  let out_size = self.width * self.height * 3
+  let out_size = checked_mul(checked_mul(self.width, self.height), 3)
   let _buf = Array::make(out_size, Byte::default())
 
   for row = 0; row < self.height; row = row + 1 {
@@ -239,11 +264,14 @@ fn BmpDecoder::decode_8bit(self : BmpDecoder) -> Image raise Failure {
   let palette = self.read_palette(256)
   let palette_rgba = palette_to_rgba_bytes(palette)
   let stride = bmp_row_stride(self.width, 8)
-  // Upfront bounds validation
-  if self.data.length() < self.data_offset + self.height * stride {
+  // Upfront bounds validation. The arithmetic is done in Int64: an
+  // Int32 overflow here produces a NEGATIVE sum, which passes the check.
+  let need = self.data_offset.to_int64() +
+    self.height.to_int64() * stride.to_int64()
+  if self.data.length().to_int64() < need {
     raise Failure::Failure("BMP: unexpected end of pixel data")
   }
-  let out_size = self.width * self.height * 4
+  let out_size = checked_mul(checked_mul(self.width, self.height), 4)
   let _buf = Array::make(out_size, Byte::default())
 
   for row = 0; row < self.height; row = row + 1 {
@@ -270,11 +298,14 @@ fn BmpDecoder::decode_4bit(self : BmpDecoder) -> Image raise Failure {
   let palette = self.read_palette(16)
   let palette_rgba = palette_to_rgba_bytes(palette)
   let stride = bmp_row_stride(self.width, 4)
-  // Upfront bounds validation
-  if self.data.length() < self.data_offset + self.height * stride {
+  // Upfront bounds validation. The arithmetic is done in Int64: an
+  // Int32 overflow here produces a NEGATIVE sum, which passes the check.
+  let need = self.data_offset.to_int64() +
+    self.height.to_int64() * stride.to_int64()
+  if self.data.length().to_int64() < need {
     raise Failure::Failure("BMP: unexpected end of pixel data")
   }
-  let out_size = self.width * self.height * 4
+  let out_size = checked_mul(checked_mul(self.width, self.height), 4)
   let _buf = Array::make(out_size, Byte::default())
 
   for row = 0; row < self.height; row = row + 1 {
@@ -307,11 +338,14 @@ fn BmpDecoder::decode_1bit(self : BmpDecoder) -> Image raise Failure {
   let palette = self.read_palette(2)
   let palette_rgba = palette_to_rgba_bytes(palette)
   let stride = bmp_row_stride(self.width, 1)
-  // Upfront bounds validation
-  if self.data.length() < self.data_offset + self.height * stride {
+  // Upfront bounds validation. The arithmetic is done in Int64: an
+  // Int32 overflow here produces a NEGATIVE sum, which passes the check.
+  let need = self.data_offset.to_int64() +
+    self.height.to_int64() * stride.to_int64()
+  if self.data.length().to_int64() < need {
     raise Failure::Failure("BMP: unexpected end of pixel data")
   }
-  let out_size = self.width * self.height * 4
+  let out_size = checked_mul(checked_mul(self.width, self.height), 4)
   let _buf = Array::make(out_size, Byte::default())
 
   for row = 0; row < self.height; row = row + 1 {

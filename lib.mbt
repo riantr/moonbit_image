@@ -297,7 +297,7 @@ fn bmp_dimensions(data : Bytes) -> (Int32, Int32, ImageFormat) raise Failure {
   let width = read_u32_le(data, 18)
   // BMP uses a signed int32 for height: a negative value means
   // top-down row order; we only care about magnitude here.
-  let height_raw = read_u32_le(data, 22)
+  let height_raw = read_u32_bits_le(data, 22)
   let height = if height_raw < 0 { -height_raw } else { height_raw }
   (width, height, ImageFormat::BMP)
 }

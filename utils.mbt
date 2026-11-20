@@ -19,26 +19,39 @@ fn read_u16_le(data : Bytes, pos : Int32) -> Int32 raise Failure {
 ///|
 /// Read a 32-bit unsigned integer in little-endian byte order
 fn read_u32_le(data : Bytes, pos : Int32) -> Int32 raise Failure {
-  if pos + 4 > data.length() {
+  if pos < 0 || pos + 4 > data.length() {
     raise Failure::Failure("read_u32_le: position out of bounds")
   }
   let b0 = data[pos].to_int()
   let b1 = data[pos + 1].to_int()
   let b2 = data[pos + 2].to_int()
   let b3 = data[pos + 3].to_int()
+  // A u32 that does not fit in an Int32 comes back as a NEGATIVE number,
+  // and a negative offset silently defeats every bounds check that
+  // compares it against a length. No image this package can hold is 2 GB
+  // long, so such a value is a malformed header, not a real one.
+  if b3 >= 0x80 {
+    raise Failure::Failure("read_u32_le: value exceeds 2^31")
+  }
   b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
 }
 
 ///|
 /// Read a 32-bit unsigned integer in big-endian byte order
 fn read_u32_be(data : Bytes, pos : Int32) -> Int32 raise Failure {
-  if pos + 4 > data.length() {
+  if pos < 0 || pos + 4 > data.length() {
     raise Failure::Failure("read_u32_be: position out of bounds")
   }
   let b0 = data[pos].to_int()
   let b1 = data[pos + 1].to_int()
   let b2 = data[pos + 2].to_int()
   let b3 = data[pos + 3].to_int()
+  // See read_u32_le: a u32 that does not fit in an Int32 would come back
+  // negative and would defeat the bounds checks that compare it with a
+  // length.
+  if b0 >= 0x80 {
+    raise Failure::Failure("read_u32_be: value exceeds 2^31")
+  }
   (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
 }
 
@@ -89,6 +102,76 @@ fn crc32_update(initial : Int32, data : Bytes) -> Int32 {
     c = crc32_table[idx] ^ lsr8(c)
   }
   c ^ 0xFFFFFFFF
+}
+
+///|
+/// Read the raw 32 bits at `pos` as a bit pattern, without deciding whether
+/// they are a number. Some fields are not numbers at all -- a PNG chunk
+/// CRC is an arbitrary 32-bit value, and the BMP height is signed by the
+/// specification -- and those must not be rejected for being "too large".
+fn read_u32_bits_le(data : Bytes, pos : Int32) -> Int32 raise Failure {
+  if pos < 0 || pos + 4 > data.length() {
+    raise Failure::Failure("read_u32_bits_le: position out of bounds")
+  }
+  let b0 = data[pos].to_int()
+  let b1 = data[pos + 1].to_int()
+  let b2 = data[pos + 2].to_int()
+  let b3 = data[pos + 3].to_int()
+  b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+}
+
+///|
+/// The big-endian counterpart of read_u32_bits_le.
+fn read_u32_bits_be(data : Bytes, pos : Int32) -> Int32 raise Failure {
+  if pos < 0 || pos + 4 > data.length() {
+    raise Failure::Failure("read_u32_bits_be: position out of bounds")
+  }
+  let b0 = data[pos].to_int()
+  let b1 = data[pos + 1].to_int()
+  let b2 = data[pos + 2].to_int()
+  let b3 = data[pos + 3].to_int()
+  (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+}
+
+///|
+/// Multiply two sizes and raise when the product cannot be represented.
+/// The sizes come from the file, and an Int32 overflow turns a huge size
+/// into a NEGATIVE one, which is what turns a rejected file into a crash.
+fn checked_mul(a : Int32, b : Int32) -> Int32 raise Failure {
+  if a < 0 || b < 0 {
+    raise Failure::Failure("size: negative factor")
+  }
+  if a != 0 && b > 2147483647 / a {
+    raise Failure::Failure("size: overflow")
+  }
+  a * b
+}
+
+///|
+/// Largest image the decoders will allocate, in pixels: 2^27 (134 MP).
+/// The same cap the reference implementation uses.
+const MAX_DECODE_PIXELS : Int32 = 134217728
+
+///|
+/// Largest width the decoders will accept, in pixels: 2^24 (16.7 MP).
+/// It keeps `width * bytes_per_pixel` inside an Int32, so the row stride
+/// and the pitch computed from it cannot overflow.
+const MAX_DECODE_WIDTH : Int32 = 16777216
+
+///|
+/// Validate the dimensions read from a header BEFORE anything is
+/// allocated. Without this a corrupt header can ask for a buffer whose
+/// size overflows, and a negative size is a crash, not a rejection.
+fn check_decode_size(width : Int32, height : Int32) -> Unit raise Failure {
+  if width <= 0 || height <= 0 {
+    raise Failure::Failure("invalid dimensions")
+  }
+  if width > MAX_DECODE_WIDTH {
+    raise Failure::Failure("image too wide")
+  }
+  if width.to_int64() * height.to_int64() > MAX_DECODE_PIXELS.to_int64() {
+    raise Failure::Failure("image too large")
+  }
 }
 
 ///|

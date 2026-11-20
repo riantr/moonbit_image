@@ -170,7 +170,7 @@ priv struct JHT {
 ///|
 /// Build a fast prefix-lookup Huffman table from BITS and HUFFVAL arrays.
 /// This eliminates the O(n) bit-at-a-time scan with an O(1) table lookup.
-fn build_jht(bits : Array[Int32], hv_in : Array[Int32]) -> JHT {
+fn build_jht(bits : Array[Int32], hv_in : Array[Int32]) -> JHT raise Failure {
   // Find the maximum code length
   let mut max_len = 0
   for l = 1; l <= 16; l = l + 1 {
@@ -190,6 +190,13 @@ fn build_jht(bits : Array[Int32], hv_in : Array[Int32]) -> JHT {
   for l = 1; l <= 16; l = l + 1 {
     let count = bits[l - 1]
     if count > 0 {
+      // The canonical codes of this length must fit in `l` bits, and a
+      // Huffman table holds at most 256 symbols. A corrupt BITS array
+      // that says otherwise would put the code OUTSIDE the prefix table
+      // below, which is an out-of-bounds WRITE.
+      if count > 256 || code + count > 1 << l {
+        raise Failure::Failure("JPEG: bad Huffman table")
+      }
       let codes = Array::make(count, 0)
       for i = 0; i < count; i = i + 1 {
         codes[i] = code
@@ -521,7 +528,10 @@ pub fn decode_jpeg(data : Bytes) -> Image raise Failure {
   let mut pos = 2
   let mut w = 0
   let mut h = 0
-  let mut nc = 1 // number of components
+  // Zero, not one: until a SOF0 has been parsed there are no components,
+  // and the component tables below are EMPTY. Defaulting to one made the
+  // scan-component lookup read `comp_id[0]` out of an empty array.
+  let mut nc = 0 // number of components
 
   // Component info from SOF0
   let mut comp_id = Array::make(0, 0) // component ID (for scan selector matching)
@@ -552,6 +562,11 @@ pub fn decode_jpeg(data : Bytes) -> Image raise Failure {
       raise Failure::Failure("JPEG: expected marker at \{pos}")
     }
     pos = pos + 1
+    // A file can end with the 0xFF of a marker; the marker byte would
+    // then be one past the end of the buffer.
+    if pos >= data.length() {
+      raise Failure::Failure("JPEG: truncated marker")
+    }
     let mb = data[pos].to_int()
     pos = pos + 1
 
@@ -569,16 +584,30 @@ pub fn decode_jpeg(data : Bytes) -> Image raise Failure {
       break
     } // EOI
 
+    if pos + 1 >= data.length() {
+      raise Failure::Failure("JPEG: truncated segment length")
+    }
     let len = (data[pos].to_int() << 8) | data[pos + 1].to_int()
     pos = pos + 2
     let end = pos + len - 2
+    if end > data.length() {
+      raise Failure::Failure("JPEG: truncated segment")
+    }
 
     if mb == 0xDB { // DQT - Define Quantization Table
       while pos < end {
+        if end - pos < 1 {
+          raise Failure::Failure("JPEG: truncated DQT")
+        }
         let info = data[pos].to_int()
         pos = pos + 1
         let tid = info & 0x0F
         let prec = (info >> 4) & 0x0F
+        // The table is 64 entries of 8 or 16 bits; the segment has to
+        // hold all of them.
+        if end - pos < (if prec == 0 { 64 } else { 128 }) {
+          raise Failure::Failure("JPEG: truncated DQT table")
+        }
         let tbl = Array::make(64, 0.0)
         for i = 0; i < 64; i = i + 1 {
           let q = if prec == 0 {
@@ -603,6 +632,9 @@ pub fn decode_jpeg(data : Bytes) -> Image raise Failure {
         }
       }
     } else if mb == 0xC0 { // SOF0 - Start of Frame (baseline)
+      if end - pos < 5 {
+        raise Failure::Failure("JPEG: truncated SOF0")
+      }
       let _precision = data[pos].to_int()
       pos = pos + 1
       let hi_h = data[pos].to_int()
@@ -611,9 +643,17 @@ pub fn decode_jpeg(data : Bytes) -> Image raise Failure {
       let lo_w = data[pos + 3].to_int()
       h = hi_h * 256 + lo_h
       w = hi_w * 256 + lo_w
+      check_decode_size(w, h)
       pos = pos + 4
+      if end - pos < 1 {
+        raise Failure::Failure("JPEG: truncated SOF0")
+      }
       nc = data[pos].to_int()
       pos = pos + 1
+      // One 3-byte component descriptor per component.
+      if end - pos < nc * 3 {
+        raise Failure::Failure("JPEG: truncated SOF0 components")
+      }
 
       comp_h = Array::make(nc, 0)
       comp_v = Array::make(nc, 0)
@@ -625,13 +665,29 @@ pub fn decode_jpeg(data : Bytes) -> Image raise Failure {
         let samp = data[pos].to_int()
         pos = pos + 1
         comp_id[i] = cid
-        comp_h[i] = (samp >> 4) & 0xF
-        comp_v[i] = samp & 0xF
-        comp_qt[i] = data[pos].to_int()
+        let h_samp = (samp >> 4) & 0xF
+        let v_samp = samp & 0xF
+        // The sampling factors are 1..4. A zero would size the component
+        // plane to nothing while the output assembly still reads it, and
+        // a value above 4 is not a sampling factor at all.
+        if h_samp == 0 || h_samp > 4 || v_samp == 0 || v_samp > 4 {
+          raise Failure::Failure("JPEG: bad sampling factor")
+        }
+        comp_h[i] = h_samp
+        comp_v[i] = v_samp
+        let qsel = data[pos].to_int()
         pos = pos + 1
+        // The quantisation table selector indexes a table of four.
+        if qsel >= 4 {
+          raise Failure::Failure("JPEG: bad quantisation table selector")
+        }
+        comp_qt[i] = qsel
       }
     } else if mb == 0xC4 { // DHT - Define Huffman Table
       while pos < end {
+        if end - pos < 17 {
+          raise Failure::Failure("JPEG: truncated DHT")
+        }
         let info = data[pos].to_int()
         pos = pos + 1
         let tc = (info >> 4) & 1 // 0=DC, 1=AC
@@ -642,6 +698,11 @@ pub fn decode_jpeg(data : Bytes) -> Image raise Failure {
           bits[i] = data[pos].to_int()
           pos = pos + 1
           total = total + bits[i]
+        }
+        // `total` is the number of code lengths the segment claims; it
+        // has to fit in what is left of the segment.
+        if end - pos < total {
+          raise Failure::Failure("JPEG: truncated DHT table")
         }
         let hv = Array::make(total, 0)
         for i = 0; i < total; i = i + 1 {
@@ -658,11 +719,21 @@ pub fn decode_jpeg(data : Bytes) -> Image raise Failure {
         }
       }
     } else if mb == 0xDD { // DRI - Define Restart Interval
+      if end - pos < 2 {
+        raise Failure::Failure("JPEG: truncated DRI")
+      }
       restart_interval = (data[pos].to_int() << 8) | data[pos + 1].to_int()
       pos = end
     } else if mb == 0xDA { // SOS - Start of Scan
+      if end - pos < 1 {
+        raise Failure::Failure("JPEG: truncated SOS")
+      }
       let ns = data[pos].to_int() // number of scan components
       pos = pos + 1
+      // Two bytes of selector per scan component.
+      if end - pos < ns * 2 {
+        raise Failure::Failure("JPEG: truncated SOS components")
+      }
 
       // Read scan component selectors: (component_id, dc_table, ac_table)
       let scan_comp_idx = Array::make(ns, 0) // maps scan component → SOF component index
@@ -675,6 +746,10 @@ pub fn decode_jpeg(data : Bytes) -> Image raise Failure {
         pos = pos + 1
         let td = (tdta >> 4) & 0xF
         let ta = tdta & 0xF
+        // The Huffman table selectors index tables of four.
+        if td >= 4 || ta >= 4 {
+          raise Failure::Failure("JPEG: bad Huffman table selector")
+        }
         scan_dc_ht[i] = td
         scan_ac_ht[i] = ta
         // Find the SOF component index that matches this component ID
@@ -687,10 +762,15 @@ pub fn decode_jpeg(data : Bytes) -> Image raise Failure {
           }
         }
         if !found {
-          scan_comp_idx[i] = i
+          // The scan names a component the frame does not define. The
+          // fallback index would point outside the component tables.
+          raise Failure::Failure("JPEG: scan component not in frame")
         }
       }
 
+      if end - pos < 3 {
+        raise Failure::Failure("JPEG: truncated SOS")
+      }
       pos = pos + 3 // skip Ss, Se, Ah/Al
 
       // Collect entropy-coded data (until next marker, stripping 0xFF00 byte stuffing)
@@ -742,7 +822,10 @@ pub fn decode_jpeg(data : Bytes) -> Image raise Failure {
 
       let planes = Array::make(nc, Array::make(0, b'\x00'))
       for i = 0; i < nc; i = i + 1 {
-        planes[i] = Array::make(comp_w[i] * comp_h_plane[i], b'\x00')
+        planes[i] = Array::make(
+          checked_mul(comp_w[i], comp_h_plane[i]),
+          b'\x00',
+        )
       }
 
       // Per-component DC predictors
@@ -836,18 +919,21 @@ pub fn decode_jpeg(data : Bytes) -> Image raise Failure {
       // Assemble output image from component planes
       if nc == 1 {
         // Grayscale: direct copy (clipping to image dimensions)
-        let out = Array::make(w * h, b'\x00')
+        let out = Array::make(checked_mul(w, h), b'\x00')
         let plane = planes[0]
         let pw = comp_w[0]
         for y = 0; y < h; y = y + 1 {
           for x = 0; x < w; x = x + 1 {
-            out[y * w + x] = plane[y * pw + x]
+            let pi = y * pw + x
+            if pi < plane.length() {
+              out[y * w + x] = plane[pi]
+            }
           }
         }
         return Image::new(w, h, PixelFormat::Gray8, Bytes::from_array(out))
       } else if nc == 3 {
         // YCbCr → RGB conversion
-        let out = Array::make(w * h * 3, b'\x00')
+        let out = Array::make(checked_mul(checked_mul(w, h), 3), b'\x00')
         let y_plane = planes[0]
         let cb_plane = planes[1]
         let cr_plane = planes[2]
@@ -863,9 +949,24 @@ pub fn decode_jpeg(data : Bytes) -> Image raise Failure {
             let cr_x = x * comp_h[2] / max_h
             let cr_y = y * comp_v[2] / max_v
 
-            let y_val = y_plane[y * y_w + x].to_int()
-            let cb_val = cb_plane[cb_y * cb_w + cb_x].to_int()
-            let cr_val = cr_plane[cr_y * cr_w + cr_x].to_int()
+            let yi = y * y_w + x
+            let cbi = cb_y * cb_w + cb_x
+            let cri = cr_y * cr_w + cr_x
+            let y_val = if yi < y_plane.length() {
+              y_plane[yi].to_int()
+            } else {
+              0
+            }
+            let cb_val = if cbi < cb_plane.length() {
+              cb_plane[cbi].to_int()
+            } else {
+              0
+            }
+            let cr_val = if cri < cr_plane.length() {
+              cr_plane[cri].to_int()
+            } else {
+              0
+            }
 
             let (r, g, b) = ycbcr_to_rgb(y_val, cb_val, cr_val)
             let di = (y * w + x) * 3
@@ -917,11 +1018,20 @@ pub fn jpeg_dimensions(data : Bytes) -> (Int32, Int32) raise Failure {
       break
     }
 
+    if pos + 1 >= data.length() {
+      raise Failure::Failure("JPEG: truncated segment length")
+    }
     let len = (data[pos].to_int() << 8) | data[pos + 1].to_int()
     pos = pos + 2
     let end = pos + len - 2
+    if end > data.length() {
+      raise Failure::Failure("JPEG: truncated segment")
+    }
 
     if mb == 0xC0 { // SOF0
+      if pos + 4 >= data.length() {
+        raise Failure::Failure("JPEG: truncated SOF0")
+      }
       let _precision = data[pos].to_int()
       pos = pos + 1
       let hi_h = data[pos].to_int()

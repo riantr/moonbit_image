@@ -79,8 +79,13 @@ def mutate_gif(root):
     p = os.path.join(root, "gif.mbt")
     s = open(p, encoding="utf-8").read()
     # every RGBA write becomes RGB: change the output buffer size from 4 to 3
-    old = "let out_size = out_w * out_h * 4"
-    new = "let out_size = out_w * out_h * 3"
+    #
+    # The size is computed through checked_mul since 0.3.14, because the
+    # dimensions come from the file and the product used to overflow an
+    # Int32. The anchor has to follow that change, otherwise the mutation
+    # is silently skipped and the check loses its teeth.
+    old = "let out_size = checked_mul(checked_mul(out_w, out_h), 4)"
+    new = "let out_size = checked_mul(checked_mul(out_w, out_h), 3)"
     if old not in s:
         return False
     s = s.replace(old, new, 1)
