@@ -27,3 +27,9 @@ Thumbs.db
 # Python bytecode from the scripts under .tools/
 __pycache__/
 *.pyc
+
+# LunaFlow / static-analysis reports. `moonx riantr/LunaFlow@latest .` writes
+# a Markdown report, a summary JSON and a JSONL trace into `reports/`; the
+# trace is tens of megabytes, and `moon publish` packages the working
+# directory, so this directory must never reach the released package.
+reports/
