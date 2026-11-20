@@ -27,6 +27,10 @@
 // reader understands it, and the package's own decoder handles it
 // directly.
 //
+// The decoder in tiff.mbt accepts more than this -- LZW, Deflate and
+// PackBits strips, a horizontal predictor and multiple strips -- but the
+// writer emits the simplest form on purpose.
+//
 // This is a from-scratch implementation: the package has no external
 // runtime dependencies, so neither libtiff nor a binding to it can be
 // used.
